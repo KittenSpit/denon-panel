@@ -1,0 +1,652 @@
+# =============================================================================
+# PHASE 1 - Waveshare ESP32-S3-Touch-LCD-4B (4", 480x480, RGB, 86-box)
+#
+#   * connect to Home Assistant (native API)
+#   * on-screen switches for light.living_two and light.test_hue_white
+#     (two-way sync, guard flag stops the ping-pong)
+#   * slider for THIS panel's backlight (local, GPIO4 PWM)
+#
+# HARDWARE BRING-UP (i2c 47/48, TCA9554 expander, bit-banged ST7701 init,
+# mipi_rgb display, GT911 touch, backlight) is taken verbatim from a proven
+# community config for this exact board:
+#   github.com/MatthieuBoulord/ESP32-S3-Touch-LCD-4B-ESPHome-Home-Assistant-Voice-Satellite
+# (its voice-assistant / audio / wake-word parts are stripped out here)
+# Full reference kept at: REF-4b-voice-satellite.yaml
+# =============================================================================
+
+substitutions:
+  name: panel-test
+  friendly_name: "Panel Test"
+  denon_ip: "192.168.1.91"     # Denon AVR-3312CI. Main="Basement", Zone2="Kitchen", Zone3="Out-Bath"
+
+esphome:
+  name: ${name}
+  friendly_name: ${friendly_name}
+  includes:
+    - denon_http.h
+  on_boot:
+    # priority 200: right after pca9554 (250) - bit-bang the ST7701S init
+    # through the expander (CS=EXIO0, MOSI=EXIO1, CLK=EXIO2) because ESPHome's
+    # SPI-over-IO-expander path is buggy on this board.
+    - priority: 200
+      then:
+        - lambda: |-
+            id(lcd_spi_clk)->setup();
+            id(lcd_spi_mosi)->setup();
+            id(lcd_spi_cs)->setup();
+            id(lcd_spi_cs)->digital_write(true);
+
+            auto spi_write = [](bool is_data, uint8_t byte) {
+              id(lcd_spi_cs)->digital_write(false);
+              id(lcd_spi_mosi)->digital_write(is_data);
+              id(lcd_spi_clk)->digital_write(true);
+              id(lcd_spi_clk)->digital_write(false);
+              for (int i = 7; i >= 0; i--) {
+                id(lcd_spi_mosi)->digital_write((byte >> i) & 1);
+                id(lcd_spi_clk)->digital_write(true);
+                id(lcd_spi_clk)->digital_write(false);
+              }
+              id(lcd_spi_cs)->digital_write(true);
+            };
+            auto cmd = [&](uint8_t c) { spi_write(false, c); };
+            auto dat = [&](uint8_t d) { spi_write(true, d); };
+
+            cmd(0x11); delay(120);
+            cmd(0xFF); dat(0x77); dat(0x01); dat(0x00); dat(0x00); dat(0x10);
+            cmd(0xC0); dat(0x3B); dat(0x00);
+            cmd(0xC1); dat(0x0D); dat(0x02);
+            cmd(0xC2); dat(0x21); dat(0x08);
+            cmd(0xCD); dat(0x08);
+            cmd(0xB0); dat(0x00); dat(0x11); dat(0x18); dat(0x0E); dat(0x11); dat(0x06); dat(0x07); dat(0x08); dat(0x07); dat(0x22); dat(0x04); dat(0x12); dat(0x0F); dat(0xAA); dat(0x31); dat(0x18);
+            cmd(0xB1); dat(0x00); dat(0x11); dat(0x19); dat(0x0E); dat(0x12); dat(0x07); dat(0x08); dat(0x08); dat(0x08); dat(0x22); dat(0x04); dat(0x11); dat(0x11); dat(0xA9); dat(0x32); dat(0x18);
+            cmd(0xFF); dat(0x77); dat(0x01); dat(0x00); dat(0x00); dat(0x11);
+            cmd(0xB0); dat(0x60);
+            cmd(0xB1); dat(0x30);
+            cmd(0xB2); dat(0x87);
+            cmd(0xB3); dat(0x80);
+            cmd(0xB5); dat(0x49);
+            cmd(0xB7); dat(0x85);
+            cmd(0xB8); dat(0x21);
+            cmd(0xC1); dat(0x78);
+            cmd(0xC2); dat(0x78); delay(20);
+            cmd(0xE0); dat(0x00); dat(0x1B); dat(0x02);
+            cmd(0xE1); dat(0x08); dat(0xA0); dat(0x00); dat(0x00); dat(0x07); dat(0xA0); dat(0x00); dat(0x00); dat(0x00); dat(0x44); dat(0x44);
+            cmd(0xE2); dat(0x11); dat(0x11); dat(0x44); dat(0x44); dat(0xED); dat(0xA0); dat(0x00); dat(0x00); dat(0xEC); dat(0xA0); dat(0x00); dat(0x00);
+            cmd(0xE3); dat(0x00); dat(0x00); dat(0x11); dat(0x11);
+            cmd(0xE4); dat(0x44); dat(0x44);
+            cmd(0xE5); dat(0x0A); dat(0xE9); dat(0xD8); dat(0xA0); dat(0x0C); dat(0xEB); dat(0xD8); dat(0xA0); dat(0x0E); dat(0xED); dat(0xD8); dat(0xA0); dat(0x10); dat(0xEF); dat(0xD8); dat(0xA0);
+            cmd(0xE6); dat(0x00); dat(0x00); dat(0x11); dat(0x11);
+            cmd(0xE7); dat(0x44); dat(0x44);
+            cmd(0xE8); dat(0x09); dat(0xE8); dat(0xD8); dat(0xA0); dat(0x0B); dat(0xEA); dat(0xD8); dat(0xA0); dat(0x0D); dat(0xEC); dat(0xD8); dat(0xA0); dat(0x0F); dat(0xEE); dat(0xD8); dat(0xA0);
+            cmd(0xEB); dat(0x02); dat(0x00); dat(0xE4); dat(0xE4); dat(0x88); dat(0x00); dat(0x40);
+            cmd(0xEC); dat(0x3C); dat(0x00);
+            cmd(0xED); dat(0xAB); dat(0x89); dat(0x76); dat(0x54); dat(0x02); dat(0xFF); dat(0xFF); dat(0xFF); dat(0xFF); dat(0xFF); dat(0xFF); dat(0x20); dat(0x45); dat(0x67); dat(0x98); dat(0xBA);
+            cmd(0xFF); dat(0x77); dat(0x01); dat(0x00); dat(0x00); dat(0x00);
+            cmd(0x36); dat(0x00);
+            cmd(0x3A); dat(0x66);
+            cmd(0x21); delay(120);
+            cmd(0x29);
+        - delay: 300ms
+        - light.turn_on:
+            id: display_backlight
+            brightness: !lambda "return id(bl_level);"
+
+esp32:
+  board: esp32-s3-devkitc-1
+  variant: esp32s3
+  flash_size: 16MB
+  framework:
+    type: esp-idf
+    sdkconfig_options:
+      CONFIG_ESP32S3_DEFAULT_CPU_FREQ_240: "y"
+      CONFIG_ESP32S3_DATA_CACHE_64KB: "y"
+      CONFIG_SPIRAM_FETCH_INSTRUCTIONS: "y"
+      CONFIG_SPIRAM_RODATA: "y"
+      CONFIG_COMPILER_OPTIMIZATION_PERF: "y"
+
+psram:
+  mode: octal
+  speed: 80MHz
+
+logger:
+
+api:
+  encryption:
+    key: !secret api_encryption_key
+
+ota:
+  - platform: esphome
+    password: !secret ota_password
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  fast_connect: true
+  power_save_mode: none
+  ap:
+    ssid: "${friendly_name} Fallback"
+    password: !secret ap_password
+
+captive_portal:
+
+time:
+  - platform: homeassistant
+    id: ha_time
+
+# --- Direct Denon AVR-3312CI control (Zone2 / Kitchen) - no HA involved -----
+# Talks straight to the receiver's goform HTTP API (telnet/port 23 is NOT
+# available on this unit - confirmed by live probe, connection refused there
+# while port 80 answers fine). Status is polled since HTTP has no push;
+# commands are fire-and-forget GETs. See denon_http.h for the XML helper.
+http_request:
+  id: denon_http
+  useragent: esphome-denon-panel
+  timeout: 2s          # bounds how long a stalled request can freeze touch/display
+  follow_redirects: false   # never chase a second URL - we don't need the body
+
+# Poll logic lives in a script (mode: single, the default - a call that
+# arrives while one is still in flight is dropped rather than stacking up)
+# so it can be triggered on a timer AND on-demand: when the Denon page is
+# selected (page on_load) and when the screen wakes from idle-dim while
+# already on that page (touchscreen on_touch), not just every 2s.
+script:
+  - id: denon_poll_zone2
+    then:
+      - http_request.get:
+          url: "http://${denon_ip}/goform/formZone2_Zone2XmlStatus.xml"
+          capture_response: true
+          on_response:
+            then:
+              - lambda: |-
+                  if (response->status_code != 200) return;
+                  std::string power = denon_xml_extract(body, "Power");
+                  std::string input = denon_xml_extract(body, "InputFuncSelect");
+                  std::string vol   = denon_xml_extract(body, "MasterVolume");
+                  std::string mute  = denon_xml_extract(body, "Mute");
+                  // <Mute> is reliable as long as it was SET via
+                  // MainZone/index.put.asp?cmd0=PutVolumeMute/ON|OFF&ZoneName=ZONE2
+                  // (verified live) - the formiPhoneAppDirect.xml?Z2MUON/OFF codes
+                  // do NOT actually flip this flag on this receiver/firmware.
+                  if (power.empty()) return;  // malformed/short read - skip this cycle
+
+                  lv_label_set_text(id(denon_status_label),
+                      (std::string("Kitchen: ") + power).c_str());
+                  lv_label_set_text(id(denon_input_label),
+                      (std::string("Input: ") + input).c_str());
+
+                  bool is_on = (power == "ON");
+                  if (is_on) lv_obj_add_state(id(denon_power_switch), LV_STATE_CHECKED);
+                  else lv_obj_clear_state(id(denon_power_switch), LV_STATE_CHECKED);
+
+                  // Skip mute sync for a few seconds after a local tap: the
+                  // receiver needs a moment to actually update this field, and
+                  // an unlucky poll landing in that window was flipping the
+                  // display back before the real state caught up (confirmed
+                  // live). Anything past the grace window is trusted normally,
+                  // so a remote/app-driven mute change still gets picked up.
+                  if (millis() - id(denon_mute_action_ms) > 3000) {
+                    bool is_muted = (mute == "on");
+                    if (is_muted) lv_obj_add_state(id(denon_mute_switch), LV_STATE_CHECKED);
+                    else lv_obj_clear_state(id(denon_mute_switch), LV_STATE_CHECKED);
+                    lv_label_set_text(id(denon_mute_label), is_muted ? "Mute: ON" : "Mute: OFF");
+                  }
+
+                  // keep the source dropdown in sync with whatever input is
+                  // actually active (remote/app changes it too, not just here)
+                  static const char *const denon_sources[] = {
+                      "TUNER", "HDRADIO", "CD", "PHONO", "NET/USB", "DVD", "BD",
+                      "TV", "SAT/CBL", "DVR", "DOCK", "GAME2", "GAME", "V.AUX"};
+                  for (int i = 0; i < 14; i++) {
+                    if (input == denon_sources[i]) {
+                      id(denon_source_dd)->set_selected_index(i, LV_ANIM_OFF);
+                      break;
+                    }
+                  }
+
+                  if (!vol.empty()) {
+                    float v = atof(vol.c_str());
+                    id(denon_vol_db) = v;
+                    char buf[16];
+                    snprintf(buf, sizeof(buf), "%.1f dB", v);
+                    lv_label_set_text(id(denon_vol_label), buf);
+                    lv_bar_set_value(id(denon_vol_bar), (int) v, LV_ANIM_OFF);
+                  }
+          on_error:
+            then:
+              - logger.log:
+                  level: WARN
+                  tag: "denon"
+                  format: "Zone2 status request failed"
+
+interval:
+  - interval: 2s
+    then:
+      - script.execute: denon_poll_zone2
+
+globals:
+  - id: bl_level
+    type: float
+    restore_value: yes
+    initial_value: "0.80"
+  - id: on_denon_page
+    type: bool
+    restore_value: no
+    initial_value: "true"      # denon_page is the default/first page
+  - id: is_dimmed
+    type: bool
+    restore_value: no
+    initial_value: "false"
+  - id: denon_vol_db
+    type: float
+    restore_value: no
+    initial_value: "-50.0"     # placeholder until the first poll lands
+  - id: denon_mute_action_ms
+    type: uint32_t
+    restore_value: no
+    initial_value: "0"         # millis() of the last local mute tap - see poll lambda
+
+# --- I2C: GPIO47 SDA / GPIO48 SCL. TCA9554 @ 0x20, GT911 @ 0x14 ---------------
+i2c:
+  - id: bus_a
+    sda: GPIO47
+    scl: GPIO48
+    frequency: 100kHz
+    scan: true
+
+pca9554:
+  - id: expander
+    i2c_id: bus_a
+    address: 0x20
+
+# software SPI over the expander, only used to give the 3 pins ids for the
+# on_boot bit-bang init above (CS=EXIO0, MOSI=EXIO1, CLK=EXIO2)
+spi:
+  - id: display_spi
+    interface: software
+    clk_pin:
+      pca9554: expander
+      number: 2
+      id: lcd_spi_clk
+    mosi_pin:
+      pca9554: expander
+      number: 1
+      id: lcd_spi_mosi
+
+# --- Backlight: GPIO4 PWM (inverted) ----------------------------------------
+output:
+  - platform: ledc
+    pin: GPIO4
+    id: backlight_pwm
+    frequency: 5000Hz
+    inverted: true
+
+light:
+  - platform: monochromatic
+    name: "Panel Backlight"
+    id: display_backlight
+    output: backlight_pwm
+    restore_mode: ALWAYS_OFF        # on_boot brings it up after display init
+    default_transition_length: 250ms
+
+# --- Display: ST7701S 480x480, 16-bit RGB ----------------------------------
+display:
+  - platform: mipi_rgb
+    id: lcd_display
+    model: CUSTOM
+    cs_pin:
+      pca9554: expander
+      number: 0
+      id: lcd_spi_cs
+    data_rate: 1MHz
+    data_pins:
+      blue:  [40, 41, 42, 2, 1]
+      green: [21, 8, 18, 45, 38, 39]
+      red:   [10, 11, 12, 13, 14]
+    de_pin: GPIO17
+    hsync_pin: GPIO46
+    vsync_pin: GPIO3
+    pclk_pin: GPIO9
+    pclk_frequency: 16MHz
+    pclk_inverted: false
+    pixel_mode: 16bit
+    dimensions:
+      width: 480
+      height: 480
+    hsync_pulse_width: 10
+    hsync_back_porch: 10
+    hsync_front_porch: 20
+    vsync_pulse_width: 10
+    vsync_back_porch: 10
+    vsync_front_porch: 10
+    invert_colors: false
+    init_sequence:
+      - [0x11]
+      - [0x29]
+
+touchscreen:
+  - platform: gt911
+    id: touch_panel
+    i2c_id: bus_a
+    display: lcd_display
+    address: 0x14
+    update_interval: 20ms
+    on_touch:
+      # waking from idle-dim while looking at the Denon page -> fresh poll
+      - if:
+          condition:
+            lambda: "return id(is_dimmed);"
+          then:
+            - lambda: "id(is_dimmed) = false;"
+            - if:
+                condition:
+                  lambda: "return id(on_denon_page);"
+                then:
+                  - script.execute: denon_poll_zone2
+      - light.turn_on:
+          id: display_backlight
+          brightness: !lambda "return id(bl_level);"
+          transition_length: 120ms
+
+# --- HA light state -> on-screen switches ---------------------------------
+# lvgl.widget.update of a switch's `checked` state does NOT re-fire its
+# on_value (only user touch does), so no guard flag is needed. The switch
+# on_value handlers below send absolute turn_on/turn_off, so a delayed
+# round-trip can't desync - the last tap always wins.
+binary_sensor:
+  - platform: homeassistant
+    id: living_two_state
+    entity_id: light.living_two
+    on_state:
+      - lvgl.widget.update:
+          id: sw_living_two
+          state:
+            checked: !lambda "return x;"
+  - platform: homeassistant
+    id: test_hue_state
+    entity_id: light.test_hue_white
+    on_state:
+      - lvgl.widget.update:
+          id: sw_hue_white
+          state:
+            checked: !lambda "return x;"
+
+# --- UI --------------------------------------------------------------------
+lvgl:
+  displays:
+    - lcd_display
+  touchscreens:
+    - touch_panel
+  buffer_size: 25%
+  bg_color: 0x0B0F14
+  text_font: montserrat_20
+  on_idle:
+    timeout: 45s
+    then:
+      - lambda: "id(is_dimmed) = true;"
+      - light.turn_on:
+          id: display_backlight
+          brightness: 12%
+          transition_length: 1s
+  style_definitions:
+    - id: row
+      bg_opa: 0%
+      border_width: 0
+      pad_all: 6
+      width: 100%
+      height: 72
+  pages:
+    # ------------------------------------------------------------- DENON/KITCHEN
+    # Default page - this panel lives in the Kitchen.
+    - id: denon_page
+      on_load:
+        - script.execute: denon_poll_zone2
+      widgets:
+        - obj:
+            width: 100%
+            height: 100%
+            pad_all: 24
+            border_width: 0
+            bg_color: 0x0B0F14
+            scrollbar_mode: "off"
+            layout:
+              type: flex
+              flex_flow: column
+              flex_align_main: space_evenly
+              flex_align_cross: center
+            widgets:
+              - label:
+                  id: denon_status_label
+                  text: "Kitchen: --"
+                  text_color: 0x8899AA
+              - label:
+                  id: denon_input_label
+                  text: "Input: --"
+                  text_color: 0xE2E8F0
+              - label:
+                  id: denon_vol_label
+                  text: "-- dB"
+                  text_color: 0xE2E8F0
+              - bar:
+                  id: denon_vol_bar
+                  width: 90%
+                  height: 16
+                  min_value: -80
+                  max_value: 20
+                  value: -50
+                  bg_color: 0x1C1C1E
+                  indicator:
+                    bg_color: 0x38BDF8
+
+              - obj:
+                  styles: row
+                  layout:
+                    type: flex
+                    flex_flow: row
+                    flex_align_main: space_between
+                    flex_align_cross: center
+                  widgets:
+                    - label: { text: "Power", text_color: 0xE2E8F0 }
+                    - switch:
+                        id: denon_power_switch
+                        on_value:
+                          - lambda: |-
+                              lv_label_set_text(id(denon_status_label), x ? "Kitchen: ON" : "Kitchen: OFF");
+                          - if:
+                              condition: { lambda: "return x;" }
+                              then:
+                                - http_request.get: { url: "http://${denon_ip}/goform/formiPhoneAppDirect.xml?Z2ON" }
+                              else:
+                                - http_request.get: { url: "http://${denon_ip}/goform/formiPhoneAppDirect.xml?Z2OFF" }
+
+              - obj:
+                  styles: row
+                  layout:
+                    type: flex
+                    flex_flow: row
+                    flex_align_main: space_between
+                    flex_align_cross: center
+                  widgets:
+                    - label: { id: denon_mute_label, text: "Mute: --", text_color: 0xE2E8F0 }
+                    - switch:
+                        id: denon_mute_switch
+                        on_value:
+                          - lambda: |-
+                              id(denon_mute_action_ms) = millis();
+                              lv_label_set_text(id(denon_mute_label), x ? "Mute: ON" : "Mute: OFF");
+                          - if:
+                              condition: { lambda: "return x;" }
+                              then:
+                                - http_request.get: { url: "http://${denon_ip}/MainZone/index.put.asp?cmd0=PutVolumeMute/ON&ZoneName=ZONE2" }
+                              else:
+                                - http_request.get: { url: "http://${denon_ip}/MainZone/index.put.asp?cmd0=PutVolumeMute/OFF&ZoneName=ZONE2" }
+
+              - obj:
+                  width: 100%
+                  height: 60
+                  bg_opa: 0%
+                  border_width: 0
+                  layout:
+                    type: flex
+                    flex_flow: row
+                    flex_align_main: space_evenly
+                    flex_align_cross: center
+                  widgets:
+                    - button:
+                        widgets: [{ label: { text: "Vol -" } }]
+                        on_click:
+                          - lambda: |-
+                              id(denon_vol_db) -= 1.0f;   // verified live: Z2DOWN/Z2UP step 1.0dB, not 0.5
+                              char buf[16];
+                              snprintf(buf, sizeof(buf), "%.1f dB", id(denon_vol_db));
+                              lv_label_set_text(id(denon_vol_label), buf);
+                              lv_bar_set_value(id(denon_vol_bar), (int) id(denon_vol_db), LV_ANIM_OFF);
+                          - http_request.get: { url: "http://${denon_ip}/goform/formiPhoneAppDirect.xml?Z2DOWN" }
+                    - button:
+                        widgets: [{ label: { text: "Vol +" } }]
+                        on_click:
+                          - lambda: |-
+                              id(denon_vol_db) += 1.0f;   // verified live: Z2DOWN/Z2UP step 1.0dB, not 0.5
+                              char buf[16];
+                              snprintf(buf, sizeof(buf), "%.1f dB", id(denon_vol_db));
+                              lv_label_set_text(id(denon_vol_label), buf);
+                              lv_bar_set_value(id(denon_vol_bar), (int) id(denon_vol_db), LV_ANIM_OFF);
+                          - http_request.get: { url: "http://${denon_ip}/goform/formiPhoneAppDirect.xml?Z2UP" }
+
+              - label:
+                  text: "Source"
+                  text_color: 0x8899AA
+              - dropdown:
+                  id: denon_source_dd
+                  width: 90%
+                  options:
+                    - "TUNER"
+                    - "HDRADIO"
+                    - "CD"
+                    - "PHONO"
+                    - "NET/USB"
+                    - "DVD"
+                    - "BD"
+                    - "TV"
+                    - "SAT/CBL"
+                    - "DVR"
+                    - "DOCK"
+                    - "GAME2"
+                    - "GAME"
+                    - "V.AUX"
+                  on_value:
+                    - http_request.get:
+                        url: !lambda 'return std::string("http://${denon_ip}/goform/formiPhoneAppDirect.xml?Z2") + text;'
+
+              - button:
+                  widgets:
+                    - label: { text: "Lights & Backlight >" }
+                  on_click:
+                    - lambda: "id(on_denon_page) = false;"
+                    - lvgl.page.show: main_page
+
+    - id: main_page
+      on_load:
+        - lvgl.slider.update:
+            id: bl_slider
+            value: !lambda "return id(bl_level) * 100.0f;"
+        - lvgl.label.update:
+            id: bl_value
+            text: !lambda "return std::to_string((int)(id(bl_level) * 100.0f)) + \"%\";"
+      widgets:
+        - obj:
+            width: 100%
+            height: 100%
+            pad_all: 24
+            border_width: 0
+            bg_color: 0x0B0F14
+            scrollbar_mode: "off"
+            layout:
+              type: flex
+              flex_flow: column
+              flex_align_main: space_evenly
+              flex_align_cross: center
+            widgets:
+              - label:
+                  text: "Phase 1  -  HA lights + backlight"
+                  text_color: 0x8899AA
+
+              - obj:
+                  styles: row
+                  layout:
+                    type: flex
+                    flex_flow: row
+                    flex_align_main: space_between
+                    flex_align_cross: center
+                  widgets:
+                    - label: { text: "Living Two" }
+                    - switch:
+                        id: sw_living_two
+                        on_value:
+                          - if:
+                              condition:
+                                lambda: "return x;"
+                              then:
+                                - homeassistant.action:
+                                    action: light.turn_on
+                                    data:
+                                      entity_id: light.living_two
+                              else:
+                                - homeassistant.action:
+                                    action: light.turn_off
+                                    data:
+                                      entity_id: light.living_two
+
+              - obj:
+                  styles: row
+                  layout:
+                    type: flex
+                    flex_flow: row
+                    flex_align_main: space_between
+                    flex_align_cross: center
+                  widgets:
+                    - label: { text: "Test Hue White" }
+                    - switch:
+                        id: sw_hue_white
+                        on_value:
+                          - if:
+                              condition:
+                                lambda: "return x;"
+                              then:
+                                - homeassistant.action:
+                                    action: light.turn_on
+                                    data:
+                                      entity_id: light.test_hue_white
+                              else:
+                                - homeassistant.action:
+                                    action: light.turn_off
+                                    data:
+                                      entity_id: light.test_hue_white
+
+              - label:
+                  text: "Screen brightness (local)"
+                  text_color: 0x8899AA
+              - slider:
+                  id: bl_slider
+                  width: 90%
+                  min_value: 5
+                  max_value: 100
+                  value: 80
+                  on_value:
+                    - lambda: "id(bl_level) = x / 100.0f;"
+                    - light.turn_on:
+                        id: display_backlight
+                        brightness: !lambda "return x / 100.0f;"
+                        transition_length: 0s
+                    - lvgl.label.update:
+                        id: bl_value
+                        text: !lambda "return std::to_string((int) x) + \"%\";"
+              - label:
+                  id: bl_value
+                  text: "80%"
+
+              - button:
+                  widgets:
+                    - label: { text: "< Denon (Kitchen)" }
+                  on_click:
+                    - lambda: "id(on_denon_page) = true;"
+                    - lvgl.page.show: denon_page

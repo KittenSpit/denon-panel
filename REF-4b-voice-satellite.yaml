@@ -1,0 +1,992 @@
+esphome:
+  name: waveshare-s3-4b
+  friendly_name: Waveshare S3 4B
+  on_boot:
+    # Priority 200 : juste après PCA9554 (250) — écran allumé avant WiFi
+    - priority: 200
+      then:
+        - lambda: |-
+            // PCA9554 setup() resets all pins to INPUT — force CLK/MOSI/CS back to OUTPUT
+            id(lcd_spi_clk)->setup();
+            id(lcd_spi_mosi)->setup();
+            id(lcd_spi_cs)->setup();
+            id(lcd_spi_cs)->digital_write(true);  // CS HIGH (idle)
+
+            // ST7701S init via bit-bang direct sur PCA9554 (contourne le bug ESPHome SPI+expander)
+            // CS=EXIO0, MOSI=EXIO1, CLK=EXIO2
+            auto spi_write = [](bool is_data, uint8_t byte) {
+              id(lcd_spi_cs)->digital_write(false);       // CS LOW
+              id(lcd_spi_mosi)->digital_write(is_data);   // D/C bit
+              id(lcd_spi_clk)->digital_write(true);
+              id(lcd_spi_clk)->digital_write(false);
+              for (int i = 7; i >= 0; i--) {
+                id(lcd_spi_mosi)->digital_write((byte >> i) & 1);
+                id(lcd_spi_clk)->digital_write(true);
+                id(lcd_spi_clk)->digital_write(false);
+              }
+              id(lcd_spi_cs)->digital_write(true);        // CS HIGH
+            };
+            auto cmd = [&](uint8_t c) { spi_write(false, c); };
+            auto dat = [&](uint8_t d) { spi_write(true, d); };
+
+            cmd(0x11); delay(120);
+            cmd(0xFF); dat(0x77); dat(0x01); dat(0x00); dat(0x00); dat(0x10);
+            cmd(0xC0); dat(0x3B); dat(0x00);
+            cmd(0xC1); dat(0x0D); dat(0x02);
+            cmd(0xC2); dat(0x21); dat(0x08);
+            cmd(0xCD); dat(0x08);
+            cmd(0xB0); dat(0x00); dat(0x11); dat(0x18); dat(0x0E); dat(0x11); dat(0x06); dat(0x07); dat(0x08); dat(0x07); dat(0x22); dat(0x04); dat(0x12); dat(0x0F); dat(0xAA); dat(0x31); dat(0x18);
+            cmd(0xB1); dat(0x00); dat(0x11); dat(0x19); dat(0x0E); dat(0x12); dat(0x07); dat(0x08); dat(0x08); dat(0x08); dat(0x22); dat(0x04); dat(0x11); dat(0x11); dat(0xA9); dat(0x32); dat(0x18);
+            cmd(0xFF); dat(0x77); dat(0x01); dat(0x00); dat(0x00); dat(0x11);
+            cmd(0xB0); dat(0x60);
+            cmd(0xB1); dat(0x30);
+            cmd(0xB2); dat(0x87);
+            cmd(0xB3); dat(0x80);
+            cmd(0xB5); dat(0x49);
+            cmd(0xB7); dat(0x85);
+            cmd(0xB8); dat(0x21);
+            cmd(0xC1); dat(0x78);
+            cmd(0xC2); dat(0x78); delay(20);
+            cmd(0xE0); dat(0x00); dat(0x1B); dat(0x02);
+            cmd(0xE1); dat(0x08); dat(0xA0); dat(0x00); dat(0x00); dat(0x07); dat(0xA0); dat(0x00); dat(0x00); dat(0x00); dat(0x44); dat(0x44);
+            cmd(0xE2); dat(0x11); dat(0x11); dat(0x44); dat(0x44); dat(0xED); dat(0xA0); dat(0x00); dat(0x00); dat(0xEC); dat(0xA0); dat(0x00); dat(0x00);
+            cmd(0xE3); dat(0x00); dat(0x00); dat(0x11); dat(0x11);
+            cmd(0xE4); dat(0x44); dat(0x44);
+            cmd(0xE5); dat(0x0A); dat(0xE9); dat(0xD8); dat(0xA0); dat(0x0C); dat(0xEB); dat(0xD8); dat(0xA0); dat(0x0E); dat(0xED); dat(0xD8); dat(0xA0); dat(0x10); dat(0xEF); dat(0xD8); dat(0xA0);
+            cmd(0xE6); dat(0x00); dat(0x00); dat(0x11); dat(0x11);
+            cmd(0xE7); dat(0x44); dat(0x44);
+            cmd(0xE8); dat(0x09); dat(0xE8); dat(0xD8); dat(0xA0); dat(0x0B); dat(0xEA); dat(0xD8); dat(0xA0); dat(0x0D); dat(0xEC); dat(0xD8); dat(0xA0); dat(0x0F); dat(0xEE); dat(0xD8); dat(0xA0);
+            cmd(0xEB); dat(0x02); dat(0x00); dat(0xE4); dat(0xE4); dat(0x88); dat(0x00); dat(0x40);
+            cmd(0xEC); dat(0x3C); dat(0x00);
+            cmd(0xED); dat(0xAB); dat(0x89); dat(0x76); dat(0x54); dat(0x02); dat(0xFF); dat(0xFF); dat(0xFF); dat(0xFF); dat(0xFF); dat(0xFF); dat(0x20); dat(0x45); dat(0x67); dat(0x98); dat(0xBA);
+            cmd(0xFF); dat(0x77); dat(0x01); dat(0x00); dat(0x00); dat(0x00);
+            cmd(0x36); dat(0x00);
+            cmd(0x3A); dat(0x66);
+            cmd(0x21); delay(120);
+            cmd(0x29);
+        - delay: 300ms
+        - light.turn_on:
+            id: display_backlight
+            brightness: 80%
+    # Priority -200 : après WiFi — audio prêt + langue restaurée
+    - priority: -200
+      then:
+        - output.turn_on: speaker_amp_enable
+        - lambda: |-
+            id(es8311_codec).set_volume(id(speaker_volume));
+            id(number_volume).publish_state(id(speaker_volume) * 100.0f);
+            id(select_language).publish_state(id(language) == 0 ? std::string("Français") : std::string("English"));
+        - script.execute: script_lang_refresh
+
+external_components:
+  - source: github://pr#14193
+    components: [gt911]
+    refresh: 1h
+
+esp32:
+  board: esp32-s3-devkitc-1
+  variant: esp32s3
+  flash_size: 16MB
+  framework:
+    type: esp-idf
+    sdkconfig_options:
+      CONFIG_ESP32S3_DEFAULT_CPU_FREQ_240: "y"
+      CONFIG_ESP32S3_DATA_CACHE_64KB: "y"
+      CONFIG_SPIRAM_FETCH_INSTRUCTIONS: "y"
+      CONFIG_SPIRAM_RODATA: "y"
+      CONFIG_COMPILER_OPTIMIZATION_PERF: "y"
+
+psram:
+  mode: octal
+  speed: 80MHz
+
+logger:
+
+api:
+  encryption:
+    key: "VOTRE_CLE_API_ESPHOME"
+
+ota:
+  - platform: esphome
+
+wifi:
+  ssid: "VOTRE_SSID"
+  password: "VOTRE_MOT_DE_PASSE"
+  fast_connect: true
+
+  ap:
+    ssid: "Waveshare Fallback"
+    password: "12345678"
+
+captive_portal:
+
+font:
+  - file: "gfonts://Montserrat"
+    id: font_time
+    size: 48
+    glyphs: "0123456789: -"
+  - file: "gfonts://Montserrat"
+    id: font_status
+    size: 24
+    glyphs: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789 .-!:/%éèêëàâùûüîïôçÉÈÊËÀ"
+  - file: "gfonts://Montserrat"
+    id: font_volume
+    size: 32
+    glyphs: "0123456789%"
+  - file: "gfonts://Montserrat"
+    id: font_small
+    size: 16
+    glyphs: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789 .-!:/%+<>_()éèêëàâùûüîïôçÀ"
+
+time:
+  - platform: homeassistant
+    id: ha_time
+    on_time_sync:
+      then:
+        - lvgl.label.update:
+            id: lbl_time
+            text: !lambda 'return id(ha_time).now().strftime("%H:%M");'
+
+interval:
+  - interval: 30s
+    then:
+      - if:
+          condition:
+            lambda: 'return id(ha_time).now().is_valid();'
+          then:
+            - lvgl.label.update:
+                id: lbl_time
+                text: !lambda 'return id(ha_time).now().strftime("%H:%M");'
+  - interval: 100ms
+    then:
+      - if:
+          condition:
+            lambda: 'return id(is_listening);'
+          then:
+            - lambda: |-
+                id(anim_val) += id(anim_dir) * 10;
+                if (id(anim_val) >= 100) { id(anim_val) = 100; id(anim_dir) = -1; }
+                if (id(anim_val) <= 0)   { id(anim_val) = 0;   id(anim_dir) = 1; }
+                lv_bar_set_value(id(bar_listening), id(anim_val), LV_ANIM_OFF);
+  - interval: 10s
+    then:
+      - lambda: |-
+          if (id(screen_timeout_sec) == 0 || !id(screen_on)) return;
+          if (millis() - id(last_touch_ms) > (uint32_t)id(screen_timeout_sec) * 1000UL) {
+            id(screen_on) = false;
+            auto call = id(display_backlight).make_call();
+            call.set_state(false);
+            call.perform();
+          }
+
+lvgl:
+  displays:
+    - lcd_display
+  touchscreens:
+    - touch_panel
+  pages:
+    - id: main_page
+      bg_color: 0x0d1117
+      widgets:
+        - label:
+            id: lbl_wifi
+            text: "WiFi"
+            text_font: font_small
+            text_color: 0x4ade80
+            align: TOP_LEFT
+            x: 20
+            y: 75
+        - label:
+            id: lbl_time
+            text: "--:--"
+            text_font: font_time
+            text_color: 0xe2e8f0
+            align: TOP_MID
+            y: 55
+        - button:
+            id: btn_settings
+            align: TOP_RIGHT
+            x: -15
+            y: 62
+            width: 85
+            height: 38
+            bg_color: 0x1e293b
+            border_width: 0
+            radius: 8
+            on_click:
+              - lvgl.page.show: settings_page
+            widgets:
+              - label:
+                  id: lbl_btn_settings
+                  text: "Param"
+                  text_font: font_small
+                  text_color: 0x94a3b8
+                  align: CENTER
+        - arc:
+            id: arc_volume
+            align: CENTER
+            y: 30
+            width: 280
+            height: 280
+            value: 70
+            min_value: 0
+            max_value: 100
+            arc_color: 0x1e293b
+            indicator:
+              arc_color: 0x38bdf8
+        - label:
+            id: lbl_status
+            text: "En veille"
+            text_font: font_status
+            text_color: 0x94a3b8
+            align: CENTER
+            y: 20
+        - label:
+            id: lbl_volume_pct
+            text: "70%"
+            text_font: font_volume
+            text_color: 0x38bdf8
+            align: CENTER
+            y: 65
+        - bar:
+            id: bar_listening
+            align: BOTTOM_MID
+            y: -22
+            width: 440
+            height: 8
+            value: 0
+            min_value: 0
+            max_value: 100
+            bg_color: 0x1e293b
+            indicator:
+              bg_color: 0x38bdf8
+            hidden: true
+
+    - id: settings_page
+      bg_color: 0x0d1117
+      widgets:
+        - button:
+            align: TOP_LEFT
+            x: 15
+            y: 15
+            width: 90
+            height: 38
+            bg_color: 0x1e293b
+            border_width: 0
+            radius: 8
+            on_click:
+              - lvgl.page.show: main_page
+            widgets:
+              - label:
+                  id: lbl_btn_back
+                  text: "< Retour"
+                  text_font: font_small
+                  text_color: 0x94a3b8
+                  align: CENTER
+        - label:
+            id: lbl_settings_title
+            text: "Parametres"
+            text_font: font_status
+            text_color: 0xe2e8f0
+            align: TOP_MID
+            y: 22
+        - label:
+            id: lbl_brightness_title
+            text: "Luminosite"
+            text_font: font_small
+            text_color: 0x64748b
+            align: TOP_LEFT
+            x: 20
+            y: 92
+        - slider:
+            id: slider_brightness
+            align: TOP_MID
+            y: 87
+            width: 220
+            height: 18
+            min_value: 10
+            max_value: 100
+            value: 80
+            indicator:
+              bg_color: 0x38bdf8
+            knob:
+              bg_color: 0x38bdf8
+            on_value:
+              - lambda: |-
+                  id(screen_brightness) = x / 100.0f;
+                  auto call = id(display_backlight).make_call();
+                  call.set_brightness(id(screen_brightness));
+                  call.perform();
+              - lvgl.label.update:
+                  id: lbl_brightness_val
+                  text: !lambda 'return to_string((int)x) + "%";'
+        - label:
+            id: lbl_brightness_val
+            text: "80%"
+            text_font: font_small
+            text_color: 0x38bdf8
+            align: TOP_RIGHT
+            x: -20
+            y: 92
+        - label:
+            id: lbl_ww_title
+            text: "Sensibilite WW"
+            text_font: font_small
+            text_color: 0x64748b
+            align: TOP_LEFT
+            x: 20
+            y: 157
+        - label:
+            id: lbl_ww_val
+            text: "50% (YAML)"
+            text_font: font_small
+            text_color: 0x38bdf8
+            align: TOP_LEFT
+            x: 20
+            y: 180
+        - label:
+            id: lbl_sleep_title
+            text: "Veille ecran"
+            text_font: font_small
+            text_color: 0x64748b
+            align: TOP_LEFT
+            x: 20
+            y: 222
+        - button:
+            align: TOP_LEFT
+            x: 15
+            y: 252
+            width: 95
+            height: 36
+            bg_color: 0x1e293b
+            border_width: 0
+            radius: 6
+            on_click:
+              - lambda: 'id(screen_timeout_sec) = 0;'
+              - lvgl.label.update:
+                  id: lbl_sleep_never
+                  text_color: 0x38bdf8
+              - lvgl.label.update:
+                  id: lbl_sleep_1min
+                  text_color: 0x94a3b8
+              - lvgl.label.update:
+                  id: lbl_sleep_5min
+                  text_color: 0x94a3b8
+              - lvgl.label.update:
+                  id: lbl_sleep_30min
+                  text_color: 0x94a3b8
+            widgets:
+              - label:
+                  id: lbl_sleep_never
+                  text: "Jamais"
+                  text_font: font_small
+                  text_color: 0x94a3b8
+                  align: CENTER
+        - button:
+            align: TOP_LEFT
+            x: 118
+            y: 252
+            width: 95
+            height: 36
+            bg_color: 0x1e293b
+            border_width: 0
+            radius: 6
+            on_click:
+              - lambda: 'id(screen_timeout_sec) = 60;'
+              - lvgl.label.update:
+                  id: lbl_sleep_never
+                  text_color: 0x94a3b8
+              - lvgl.label.update:
+                  id: lbl_sleep_1min
+                  text_color: 0x38bdf8
+              - lvgl.label.update:
+                  id: lbl_sleep_5min
+                  text_color: 0x94a3b8
+              - lvgl.label.update:
+                  id: lbl_sleep_30min
+                  text_color: 0x94a3b8
+            widgets:
+              - label:
+                  id: lbl_sleep_1min
+                  text: "1 min"
+                  text_font: font_small
+                  text_color: 0x38bdf8
+                  align: CENTER
+        - button:
+            align: TOP_LEFT
+            x: 221
+            y: 252
+            width: 95
+            height: 36
+            bg_color: 0x1e293b
+            border_width: 0
+            radius: 6
+            on_click:
+              - lambda: 'id(screen_timeout_sec) = 300;'
+              - lvgl.label.update:
+                  id: lbl_sleep_never
+                  text_color: 0x94a3b8
+              - lvgl.label.update:
+                  id: lbl_sleep_1min
+                  text_color: 0x94a3b8
+              - lvgl.label.update:
+                  id: lbl_sleep_5min
+                  text_color: 0x38bdf8
+              - lvgl.label.update:
+                  id: lbl_sleep_30min
+                  text_color: 0x94a3b8
+            widgets:
+              - label:
+                  id: lbl_sleep_5min
+                  text: "5 min"
+                  text_font: font_small
+                  text_color: 0x94a3b8
+                  align: CENTER
+        - button:
+            align: TOP_LEFT
+            x: 324
+            y: 252
+            width: 105
+            height: 36
+            bg_color: 0x1e293b
+            border_width: 0
+            radius: 6
+            on_click:
+              - lambda: 'id(screen_timeout_sec) = 1800;'
+              - lvgl.label.update:
+                  id: lbl_sleep_never
+                  text_color: 0x94a3b8
+              - lvgl.label.update:
+                  id: lbl_sleep_1min
+                  text_color: 0x94a3b8
+              - lvgl.label.update:
+                  id: lbl_sleep_5min
+                  text_color: 0x94a3b8
+              - lvgl.label.update:
+                  id: lbl_sleep_30min
+                  text_color: 0x38bdf8
+            widgets:
+              - label:
+                  id: lbl_sleep_30min
+                  text: "30 min"
+                  text_font: font_small
+                  text_color: 0x94a3b8
+                  align: CENTER
+        - label:
+            id: lbl_lang_title
+            text: "Langue"
+            text_font: font_small
+            text_color: 0x64748b
+            align: TOP_LEFT
+            x: 20
+            y: 300
+        - button:
+            align: TOP_LEFT
+            x: 15
+            y: 328
+            width: 110
+            height: 36
+            bg_color: 0x1e293b
+            border_width: 0
+            radius: 6
+            on_click:
+              - lambda: 'id(language) = 0;'
+              - script.execute: script_lang_refresh
+            widgets:
+              - label:
+                  text: "Français"
+                  text_font: font_small
+                  text_color: 0x94a3b8
+                  align: CENTER
+        - button:
+            align: TOP_LEFT
+            x: 133
+            y: 328
+            width: 110
+            height: 36
+            bg_color: 0x1e293b
+            border_width: 0
+            radius: 6
+            on_click:
+              - lambda: 'id(language) = 1;'
+              - script.execute: script_lang_refresh
+            widgets:
+              - label:
+                  text: "English"
+                  text_font: font_small
+                  text_color: 0x94a3b8
+                  align: CENTER
+        - label:
+            id: lbl_settings_ssid
+            text: "WiFi: ..."
+            text_font: font_small
+            text_color: 0x64748b
+            align: TOP_LEFT
+            x: 20
+            y: 380
+        - label:
+            id: lbl_settings_ip
+            text: "IP: ..."
+            text_font: font_small
+            text_color: 0x64748b
+            align: TOP_LEFT
+            x: 20
+            y: 415
+
+# Audio I2S — BCLK=16, WS=7, MCLK=5, DOUT(speaker)=6, DIN(mic)=15
+i2s_audio:
+  - id: i2s_bus
+    i2s_lrclk_pin: GPIO7
+    i2s_bclk_pin: GPIO16
+    i2s_mclk_pin: GPIO5
+
+# ES8311 speaker DAC (I2C 0x18)
+audio_dac:
+  - platform: es8311
+    id: es8311_codec
+    i2c_id: bus_a
+    address: 0x18
+    bits_per_sample: 16bit
+    sample_rate: 16000
+    use_mclk: true
+
+# ES7210 microphone ADC (I2C 0x40)
+audio_adc:
+  - platform: es7210
+    id: es7210_codec
+    i2c_id: bus_a
+    address: 0x40
+    bits_per_sample: 16bit
+    sample_rate: 16000
+    mic_gain: 33db
+
+microphone:
+  - platform: i2s_audio
+    id: board_mic
+    i2s_audio_id: i2s_bus
+    i2s_din_pin: GPIO15
+    adc_type: external
+    pdm: false
+    channel: left
+
+speaker:
+  - platform: i2s_audio
+    id: board_speaker
+    i2s_audio_id: i2s_bus
+    i2s_dout_pin: GPIO6
+    dac_type: external
+    channel: mono
+
+globals:
+  - id: language
+    type: int
+    restore_value: true
+    initial_value: '0'  # 0=FR, 1=EN
+  - id: speaker_volume
+    type: float
+    restore_value: true
+    initial_value: '0.7'
+  - id: ww_threshold
+    type: float
+    restore_value: true
+    initial_value: '0.5'
+  - id: screen_timeout_sec
+    type: int
+    restore_value: true
+    initial_value: '60'
+  - id: screen_brightness
+    type: float
+    restore_value: true
+    initial_value: '0.8'
+  - id: screen_on
+    type: bool
+    initial_value: 'true'
+  - id: last_touch_ms
+    type: uint32_t
+    initial_value: '0'
+  - id: is_listening
+    type: bool
+    initial_value: 'false'
+  - id: anim_val
+    type: int
+    initial_value: '0'
+  - id: anim_dir
+    type: int
+    initial_value: '1'
+
+script:
+  - id: script_lang_refresh
+    then:
+      - lvgl.label.update:
+          id: lbl_btn_settings
+          text: !lambda 'return std::string(id(language)==0 ? "Param" : "Settings");'
+      - lvgl.label.update:
+          id: lbl_btn_back
+          text: !lambda 'return std::string(id(language)==0 ? "< Retour" : "< Back");'
+      - lvgl.label.update:
+          id: lbl_settings_title
+          text: !lambda 'return std::string(id(language)==0 ? "Parametres" : "Settings");'
+      - lvgl.label.update:
+          id: lbl_brightness_title
+          text: !lambda 'return std::string(id(language)==0 ? "Luminosite" : "Brightness");'
+      - lvgl.label.update:
+          id: lbl_ww_title
+          text: !lambda 'return std::string(id(language)==0 ? "Sensibilite WW" : "Wake Word");'
+      - lvgl.label.update:
+          id: lbl_ww_val
+          text: !lambda 'return std::string(id(language)==0 ? "50% (YAML)" : "50% (in YAML)");'
+      - lvgl.label.update:
+          id: lbl_sleep_title
+          text: !lambda 'return std::string(id(language)==0 ? "Veille ecran" : "Screen sleep");'
+      - lvgl.label.update:
+          id: lbl_sleep_never
+          text: !lambda 'return std::string(id(language)==0 ? "Jamais" : "Never");'
+      - lvgl.label.update:
+          id: lbl_lang_title
+          text: !lambda 'return std::string(id(language)==0 ? "Langue" : "Language");'
+      - lvgl.label.update:
+          id: lbl_status
+          text: !lambda 'return std::string(id(language)==0 ? "En veille" : "Standby");'
+
+binary_sensor:
+  - platform: gpio
+    pin:
+      number: GPIO0
+      mode: INPUT_PULLUP
+      inverted: true
+    name: "Button Vol Down"
+    filters:
+      - delayed_on: 20ms
+    on_press:
+      - lambda: |-
+          float v = id(speaker_volume) - 0.1f;
+          if (v < 0.1f) v = 0.1f;
+          id(speaker_volume) = v;
+          id(es8311_codec).set_volume(v);
+          id(number_volume).publish_state(v * 100.0f);
+          ESP_LOGI("volume", "Vol Down -> %.0f%%", v * 100);
+      - lvgl.arc.update:
+          id: arc_volume
+          value: !lambda 'return (int)(id(speaker_volume) * 100);'
+      - lvgl.label.update:
+          id: lbl_volume_pct
+          text: !lambda 'return to_string((int)(id(speaker_volume) * 100)) + "%";'
+  - platform: gpio
+    pin:
+      pca9554: expander
+      number: 4
+      mode:
+        input: true
+      inverted: true
+    name: "Button Vol Up"
+    filters:
+      - delayed_on: 20ms
+    on_press:
+      - lambda: |-
+          float v = id(speaker_volume) + 0.1f;
+          if (v > 1.0f) v = 1.0f;
+          id(speaker_volume) = v;
+          id(es8311_codec).set_volume(v);
+          id(number_volume).publish_state(v * 100.0f);
+          ESP_LOGI("volume", "Vol Up -> %.0f%%", v * 100);
+      - lvgl.arc.update:
+          id: arc_volume
+          value: !lambda 'return (int)(id(speaker_volume) * 100);'
+      - lvgl.label.update:
+          id: lbl_volume_pct
+          text: !lambda 'return to_string((int)(id(speaker_volume) * 100)) + "%";'
+
+micro_wake_word:
+  id: mww
+  models:
+    - model: hey_jarvis
+      probability_cutoff: 0.5
+    - model: okay_nabu
+      probability_cutoff: 0.5
+  on_wake_word_detected:
+    - lambda: |-
+        id(last_touch_ms) = millis();
+        if (!id(screen_on)) {
+          id(screen_on) = true;
+          auto call = id(display_backlight).make_call();
+          call.set_state(true);
+          call.set_brightness(id(screen_brightness));
+          call.perform();
+        }
+        id(is_listening) = true;
+        lv_obj_clear_flag(id(bar_listening), LV_OBJ_FLAG_HIDDEN);
+    - lvgl.label.update:
+        id: lbl_status
+        text: !lambda 'return std::string(id(language)==0 ? "Mot-cle !" : "Wake word!");'
+    - voice_assistant.start:
+        wake_word: !lambda return wake_word;
+
+voice_assistant:
+  id: va
+  microphone: board_mic
+  speaker: board_speaker
+  micro_wake_word: mww
+  noise_suppression_level: 2
+  auto_gain: 31dBFS
+  volume_multiplier: 4.0
+  on_client_connected:
+    - lvgl.label.update:
+        id: lbl_status
+        text: !lambda 'return std::string(id(language)==0 ? "En veille" : "Standby");'
+    - if:
+        condition:
+          lambda: 'return id(switch_microphone).state;'
+        then:
+          - micro_wake_word.start:
+              id: mww
+  on_client_disconnected:
+    - lvgl.label.update:
+        id: lbl_status
+        text: !lambda 'return std::string(id(language)==0 ? "Déconnecté" : "Disconnected");'
+    - micro_wake_word.stop:
+        id: mww
+    - voice_assistant.stop:
+  on_listening:
+    - lambda: |-
+        id(is_listening) = true;
+        lv_obj_clear_flag(id(bar_listening), LV_OBJ_FLAG_HIDDEN);
+    - lvgl.label.update:
+        id: lbl_status
+        text: !lambda 'return std::string(id(language)==0 ? "En ecoute..." : "Listening...");'
+  on_tts_stream_start:
+    - lambda: |-
+        id(is_listening) = false;
+        lv_obj_add_flag(id(bar_listening), LV_OBJ_FLAG_HIDDEN);
+    - lvgl.label.update:
+        id: lbl_status
+        text: !lambda 'return std::string(id(language)==0 ? "Repond..." : "Answering...");'
+    # Libère le bus I2S pour le speaker (mic et speaker partagent le même bus)
+    - micro_wake_word.stop:
+        id: mww
+    - lambda: |-
+        id(es8311_codec).set_volume(id(speaker_volume));
+    - audio_dac.mute_off:
+        id: es8311_codec
+  on_tts_stream_end:
+    - lvgl.label.update:
+        id: lbl_status
+        text: !lambda 'return std::string(id(language)==0 ? "En veille" : "Standby");'
+  on_end:
+    - lambda: |-
+        id(is_listening) = false;
+        lv_obj_add_flag(id(bar_listening), LV_OBJ_FLAG_HIDDEN);
+    - lvgl.label.update:
+        id: lbl_status
+        text: !lambda 'return std::string(id(language)==0 ? "En veille" : "Standby");'
+  on_idle:
+    - if:
+        condition:
+          lambda: 'return id(switch_microphone).state;'
+        then:
+          - micro_wake_word.start:
+              id: mww
+  on_error:
+    - lambda: |-
+        id(is_listening) = false;
+        lv_obj_add_flag(id(bar_listening), LV_OBJ_FLAG_HIDDEN);
+    - lvgl.label.update:
+        id: lbl_status
+        text: !lambda 'return std::string(id(language)==0 ? "Erreur" : "Error");'
+    - delay: 1000ms
+    - if:
+        condition:
+          lambda: 'return id(switch_microphone).state;'
+        then:
+          - micro_wake_word.start:
+              id: mww
+
+# I2C — TCA9554 IO expander (0x20) + GT911 touch (0x14)
+i2c:
+  - id: bus_a
+    sda: GPIO47
+    scl: GPIO48
+    frequency: 100kHz
+
+# IO expander TCA9554 : SPI init display (pins 0/1/2)
+pca9554:
+  - id: expander
+    i2c_id: bus_a
+    address: 0x20
+
+# SPI software via TCA9554 pour init ST7701S
+# CS=EXIO0, SDA/MOSI=EXIO1, SCL/CLK=EXIO2
+spi:
+  - id: display_spi
+    interface: software
+    clk_pin:
+      pca9554: expander
+      number: 2
+      id: lcd_spi_clk
+    mosi_pin:
+      pca9554: expander
+      number: 1
+      id: lcd_spi_mosi
+
+# Backlight GPIO4 via LEDC
+output:
+  - platform: ledc
+    pin: GPIO4
+    id: backlight_pwm
+    frequency: 5000Hz
+    inverted: true
+  - platform: gpio
+    id: speaker_amp_enable
+    pin:
+      pca9554: expander
+      number: 3
+      mode:
+        output: true
+
+light:
+  - platform: monochromatic
+    name: "Display Backlight"
+    id: display_backlight
+    output: backlight_pwm
+    restore_mode: ALWAYS_ON
+    default_transition_length: 1s
+
+# Touch GT911 via I2C (pas de reset/interrupt hardware sur ce board)
+touchscreen:
+  - platform: gt911
+    id: touch_panel
+    i2c_id: bus_a
+    display: lcd_display
+    address: 0x14
+    update_interval: 20ms
+    on_touch:
+      - lambda: |-
+          if (!id(switch_touchscreen).state) return;
+          id(last_touch_ms) = millis();
+          if (!id(screen_on)) {
+            id(screen_on) = true;
+            auto call = id(display_backlight).make_call();
+            call.set_state(true);
+            call.set_brightness(id(screen_brightness));
+            call.perform();
+          }
+
+sensor:
+  - platform: wifi_signal
+    id: wifi_signal_db
+    update_interval: 30s
+    internal: true
+    on_value:
+      - lvgl.label.update:
+          id: lbl_wifi
+          text: !lambda |-
+            if (x > -50) return std::string("WiFi +++");
+            if (x > -70) return std::string("WiFi ++-");
+            return std::string("WiFi ---");
+
+text_sensor:
+  - platform: wifi_info
+    ssid:
+      id: wifi_ssid
+      internal: true
+      on_value:
+        - lvgl.label.update:
+            id: lbl_settings_ssid
+            text: !lambda 'return "WiFi: " + x;'
+    ip_address:
+      id: wifi_ip
+      internal: true
+      on_value:
+        - lvgl.label.update:
+            id: lbl_settings_ip
+            text: !lambda 'return "IP: " + x;'
+
+select:
+  - platform: template
+    name: "Langue"
+    id: select_language
+    icon: mdi:translate
+    options:
+      - "Français"
+      - "English"
+    optimistic: true
+    on_value:
+      - lambda: 'id(language) = (x == "Français") ? 0 : 1;'
+      - script.execute: script_lang_refresh
+
+number:
+  - platform: template
+    name: "Volume"
+    id: number_volume
+    icon: mdi:volume-high
+    min_value: 10
+    max_value: 100
+    step: 5
+    unit_of_measurement: "%"
+    mode: slider
+    optimistic: true
+    set_action:
+      - lambda: |-
+          id(speaker_volume) = x / 100.0f;
+          id(es8311_codec).set_volume(id(speaker_volume));
+      - lvgl.arc.update:
+          id: arc_volume
+          value: !lambda 'return (int)x;'
+      - lvgl.label.update:
+          id: lbl_volume_pct
+          text: !lambda 'return to_string((int)x) + "%";'
+
+switch:
+  - platform: template
+    name: "Ecran tactile"
+    id: switch_touchscreen
+    icon: mdi:gesture-tap
+    restore_mode: RESTORE_DEFAULT_ON
+    optimistic: true
+  - platform: template
+    name: "Microphone"
+    id: switch_microphone
+    icon: mdi:microphone
+    restore_mode: RESTORE_DEFAULT_ON
+    optimistic: true
+    on_turn_on:
+      - micro_wake_word.start:
+          id: mww
+    on_turn_off:
+      - voice_assistant.stop:
+      - micro_wake_word.stop:
+          id: mww
+
+# Display ST7701S 480x480 — RGB 16-bit + init via SPI sur TCA9554
+display:
+  - platform: mipi_rgb
+    id: lcd_display
+    model: CUSTOM
+    cs_pin:
+      pca9554: expander
+      number: 0
+      id: lcd_spi_cs
+    data_rate: 1MHz
+    data_pins:
+      blue:  [40, 41, 42,  2,  1]
+      green: [21,  8, 18, 45, 38, 39]
+      red:   [10, 11, 12, 13, 14]
+    de_pin: GPIO17
+    hsync_pin: GPIO46
+    vsync_pin: GPIO3
+    pclk_pin: GPIO9
+    pclk_frequency: 16MHz
+    pclk_inverted: false
+    pixel_mode: 16bit
+    dimensions:
+      width: 480
+      height: 480
+    hsync_pulse_width: 10
+    hsync_back_porch: 10
+    hsync_front_porch: 20
+    vsync_pulse_width: 10
+    vsync_back_porch: 10
+    vsync_front_porch: 10
+    invert_colors: false
+    init_sequence:
+      - [0x11]
+      - [0x29]

@@ -1,0 +1,663 @@
+## ============================================================================
+## Waveshare ESP32-S3-Touch-LCD-4.3B  —  Home Assistant Control Panel
+## ============================================================================
+## An ESPHome + LVGL replacement for the factory demo that turns the board
+## into a live, touch-controlled Home Assistant dashboard:
+##   - Big clock + date (from Home Assistant's clock, no NTP needed)
+##   - Two light "cards" you can tap to toggle, that stay in sync with the
+##     real state in Home Assistant (someone flipping it via the app updates
+##     the panel too, and vice versa)
+##   - A second page with temperature/humidity gauges pulled live from HA
+##   - A third page with a centered box that cycles through colors — it only
+##     animates while that page is actually on screen, so it doesn't waste
+##     redraws in the background on the other two pages
+##   - A bottom nav bar on every page to jump to either of the other two
+##
+## HOW THIS WORKS
+##   ESPHome's native "api:" component talks directly to Home Assistant over
+##   your WiFi — no MQTT broker needed. Entities are pulled IN with
+##   `platform: homeassistant` sensors, and buttons push actions OUT with the
+##   `homeassistant.action` call. This is the standard, supported way to build
+##   an ESPHome+LVGL HA panel.
+##
+## BEFORE YOU FLASH — edit these:
+##   1. secrets.yaml (see secrets.yaml.example) — your WiFi + a fresh API
+##      encryption key.
+##   2. The `entity_id:` lines below (search for "CHANGE ME") — point them at
+##      real entities from your own Home Assistant instance.
+##
+## PERFORMANCE NOTES (as of this revision):
+##   - pclk_frequency at 14MHz — DO NOT go lower, 12MHz was tested and left
+##     the display entirely blank/white (below the panel's minimum).
+##   - i2c frequency lowered to 10kHz — tested and confirmed to improve touch
+##     reliability on this board's shared touch/IO-expander bus.
+##   - CONFIG_ESP_TASK_WDT_TIMEOUT_S raised to 10s for extra slack before a
+##     slow LVGL redraw can trip the watchdog and force a reboot.
+##   - Only the clock ticks every second; the date updates every 30s; the
+##     TV Room status is event-driven (fires on the light's actual on_state)
+##     instead of being polled every second forever — cuts continuous
+##     PSRAM-bandwidth contention on this single-frame-buffer RGB panel.
+##   - The color-cycling box's interval checks an `on_color_page` global
+##     (set true/false by each nav button's on_click) before doing anything,
+##     so it's a no-op — no redraw, no lambda work — whenever you're on the
+##     home or climate page.
+##
+## KNOWN NOT-YET-FIXED ITEM:
+##   - The two light buttons' on-screen color still reflects whatever the
+##     last user tap set locally (via `checkable: true`) until the next real
+##     HA state update corrects it — if a `homeassistant.action` call were
+##     ever silently rejected again (e.g. the "Allow Home Assistant actions"
+##     permission getting turned off), the button could show a color that
+##     doesn't match the real light until the next genuine state change.
+##
+## Tested against: ESPHome 2024.10+ (needs the ch422g + rpi_dpi_rgb + lvgl
+## components). Pin mapping below is specific to the "B" hardware variant
+## (RGB parallel LCD + GT911 touch + CH422G IO expander), confirmed against
+## Waveshare's own wiki and community-verified working configs — NOT the same
+## pinout as the plain 4.3 or 4.3C variants, so don't reuse this for those.
+## ============================================================================
+substitutions:
+  color_on: "0x0A84FF"        # blue — "on" / checked state (button, switch)
+  color_success: "0x34C759"   # green — switch checked color
+  color_off: "0xB0B0B5"       # light grey — button off state
+  color_text_dim: "0x9A9A9E"  # secondary/status text
+  color_card_bg: "0x1C1C1E"   # card background
+  color_temp: "0xFF9F0A"      # temperature arc (orange)
+  color_humidity: "0x64D2FF"  # humidity arc (cyan)
+
+esphome:
+  name: ha-panel-4-3b
+  friendly_name: "HA Panel"
+  platformio_options:
+    build_flags: "-DBOARD_HAS_PSRAM"
+    board_build.arduino.memory_type: qio_opi
+    board_build.flash_mode: dio
+    board_upload.maximum_ram_size: 524288
+
+esp32:
+  board: esp32-s3-devkitc-1
+  variant: esp32s3
+  framework:
+    type: esp-idf
+    sdkconfig_options:
+      CONFIG_ESP32S3_DEFAULT_CPU_FREQ_240: y
+      CONFIG_ESP32S3_DATA_CACHE_64KB: y
+      CONFIG_SPIRAM_FETCH_INSTRUCTIONS: y
+      CONFIG_SPIRAM_RODATA: y
+      CONFIG_ESP_TASK_WDT_TIMEOUT_S: "10"
+
+psram:
+  mode: octal
+  speed: 80MHz
+
+logger:
+  # RGB/LVGL is timing-sensitive; keep serial logging light so it doesn't
+  # steal cycles and cause display glitches.
+  level: INFO
+
+# ---------------------------------------------------------------------------
+# Networking + Home Assistant API
+# ---------------------------------------------------------------------------
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  ap:
+    ssid: "HA-Panel Fallback"
+    password: !secret fallback_ap_password
+
+captive_portal:
+
+api:
+  encryption:
+    key: !secret api_encryption_key
+
+ota:
+  - platform: esphome
+    password: !secret ota_password
+
+# Pull wall-clock time from Home Assistant itself — one less thing to manage.
+time:
+  - platform: homeassistant
+    id: ha_time
+
+# ---------------------------------------------------------------------------
+# I2C bus — shared by the GT911 touch controller and the CH422G IO expander
+# ---------------------------------------------------------------------------
+i2c:
+  sda: GPIO8
+  scl: GPIO9
+  id: bus_a
+  frequency: 10kHz
+
+# The CH422G is an IO expander on this board that handles the LCD reset,
+# display-enable, and SD-card chip-select lines (they're not wired to raw
+# ESP32 GPIOs). ESPHome's ch422g component lets other components reference
+# its pins directly, as shown in the display/touchscreen config below.
+ch422g:
+  - id: io_expander
+
+# ---------------------------------------------------------------------------
+# LCD backlight — CH422G EXIO2 / DISP
+# Exposed to Home Assistant as a switch. Turning it ON also resumes LVGL;
+# turning it OFF pauses LVGL. Touch input can resume LVGL and the on_resume
+# handler below will turn the backlight back on.
+# ---------------------------------------------------------------------------
+switch:
+  - platform: gpio
+    id: display_backlight
+    name: "Display Backlight"
+    icon: mdi:monitor
+    entity_category: config
+    restore_mode: ALWAYS_ON
+    pin:
+      ch422g: io_expander
+      number: 2
+      mode: OUTPUT
+    on_turn_on:
+      - lvgl.resume:
+    on_turn_off:
+      - lvgl.pause:
+
+# ---------------------------------------------------------------------------
+# Display: 800x480 RGB IPS panel (ST7262 driver, parallel RGB interface)
+# ---------------------------------------------------------------------------
+display:
+  - platform: rpi_dpi_rgb
+    id: my_display
+    auto_clear_enabled: false
+    color_order: RGB
+    pclk_frequency: 14MHz
+    dimensions:
+      width: 800
+      height: 480
+    de_pin:
+      number: 5
+    hsync_pin:
+      number: 46
+      ignore_strapping_warning: true
+    vsync_pin:
+      number: 3
+      ignore_strapping_warning: true
+    pclk_pin: 7
+    reset_pin:
+      ch422g: io_expander
+      number: 3
+    hsync_back_porch: 16
+    hsync_front_porch: 16
+    hsync_pulse_width: 8
+    vsync_back_porch: 16
+    vsync_front_porch: 16
+    vsync_pulse_width: 8
+    data_pins:
+      red: [1, 2, 42, 41, 40]
+      green: [39, 0, 45, 48, 47, 21]
+      blue: [14, 38, 18, 17, 10]
+
+# ---------------------------------------------------------------------------
+# Touch: GT911 capacitive controller, 5-point, over the same I2C bus
+# ---------------------------------------------------------------------------
+touchscreen:
+  platform: gt911
+  id: my_touch
+  interrupt_pin: GPIO4
+  reset_pin:
+    ch422g: io_expander
+    number: 1
+    mode: OUTPUT
+  on_release:
+    - if:
+        condition: lvgl.is_paused
+        then:
+          - lvgl.resume:
+          - lvgl.widget.redraw:
+
+# ---------------------------------------------------------------------------
+# Fonts
+# ---------------------------------------------------------------------------
+font:
+  - file: "gfonts://Roboto"
+    id: font_clock
+    size: 64
+  - file: "gfonts://Roboto"
+    id: font_large
+    size: 28
+  - file: "gfonts://Roboto"
+    id: font_medium
+    size: 20
+  - file: "gfonts://Roboto"
+    id: font_small
+    size: 16
+
+# ---------------------------------------------------------------------------
+# Guard flags — prevent HA-state-sync from re-triggering the toggle actions
+# that push a state back to HA (which would otherwise ping-pong forever)
+# ---------------------------------------------------------------------------
+globals:
+  - id: syncing_living_two
+    type: bool
+    initial_value: "false"
+  - id: syncing_test_hue
+    type: bool
+    initial_value: "false"
+  - id: color_cycle_index
+    type: int
+    initial_value: "0"
+  - id: on_color_page
+    type: bool
+    initial_value: "false"
+
+# ---------------------------------------------------------------------------
+# Entities pulled IN from Home Assistant
+# CHANGE ME: point these entity_id fields at your real entities.
+# ---------------------------------------------------------------------------
+binary_sensor:
+  - platform: homeassistant
+    id: living_two_state
+    entity_id: light.living_two   # CHANGE ME
+    on_state:
+      - lambda: id(syncing_living_two) = true;
+      - lvgl.widget.update:
+          id: living_two_button
+          state:
+            checked: !lambda "return x;"
+      - lambda: id(syncing_living_two) = false;
+
+  - platform: homeassistant
+    id: test_hue_state
+    entity_id: light.test_hue_white      # CHANGE ME
+    on_state:
+      - lambda: id(syncing_test_hue) = true;
+      - lvgl.widget.update:
+          id: test_hue_button
+          state:
+            checked: !lambda "return x;"
+      - lambda: id(syncing_test_hue) = false;
+
+sensor:
+  - platform: homeassistant
+    id: bathroom_2_temperature
+    entity_id: sensor.bathroom_2_temperature   # CHANGE ME
+    on_value:
+      - lvgl.arc.update:
+          id: temp_arc
+          value: !lambda "return (int) x;"
+      - lvgl.label.update:
+          id: temp_value_label
+          text:
+            format: "%.1f°C"
+            args: ["x"]
+
+  - platform: homeassistant
+    id: bathroom_2_humidity
+    entity_id: sensor.bathroom_2_humidity      # CHANGE ME
+    on_value:
+      - lvgl.arc.update:
+          id: humidity_arc
+          value: !lambda "return (int) x;"
+      - lvgl.label.update:
+          id: humidity_value_label
+          text:
+            format: "%.0f%%"
+            args: ["x"]
+
+# ---------------------------------------------------------------------------
+# LVGL UI
+# ---------------------------------------------------------------------------
+lvgl:
+  displays: [my_display]
+  touchscreens: [my_touch]
+  color_depth: 16
+  resume_on_input: true
+
+  # Screen saver: after 60 seconds without touch, turn off the physical
+  # backlight. The backlight switch pauses LVGL. Any touch resumes LVGL;
+  # on_resume restores the backlight. Turning Display Backlight ON from HA
+  # also resumes LVGL and starts a fresh 60-second inactivity period.
+  on_idle:
+    timeout: 60s
+    then:
+      - switch.turn_off: display_backlight
+
+  on_resume:
+    then:
+      - switch.turn_on: display_backlight
+      - lvgl.widget.redraw:
+
+  theme:
+    button:
+      bg_color: 0x2C2C2E
+      text_color: 0xFFFFFF
+      radius: 10
+      checked:
+        bg_color: 0x0A84FF
+    switch:
+      bg_color: 0x3A3A3C
+      checked:
+        bg_color: 0x34C759
+
+  pages:
+    # ----------------------------------------------------------------- HOME
+    - id: home_page
+      bg_color: 0x000000
+      widgets:
+        - label:
+            id: clock_label
+            text: "--:--:--"
+            text_font: font_clock
+            text_color: 0xFFFFFF
+            align: TOP_MID
+            y: 10
+
+        - label:
+            id: date_label
+            text: "Loading..."
+            text_font: font_medium
+            text_color: 0x9A9A9E
+            align: TOP_MID
+            y: 90
+
+        # ---- Test Hue card ----
+        - button:
+            id: test_hue_button
+            x: 125
+            y: 160
+            width: 130
+            height: 65
+            checkable: true
+            bg_color: 0x0A84FF      # blue when off
+            checked:
+              bg_color: 0x34C759    # green when on
+            widgets:
+              - label:
+                  text: "Test Hue"
+                  text_color: 0xFFFFFF
+                  align: CENTER
+            on_click:
+              - if:
+                  condition:
+                    lambda: "return !id(syncing_test_hue);"
+                  then:
+                    - homeassistant.action:
+                        action: light.toggle
+                        data:
+                          entity_id: light.test_hue_white
+
+        # ---- Living Two button ----
+        - button:
+            id: living_two_button
+            x: 415
+            y: 160
+            width: 130
+            height: 65
+            checkable: true
+            bg_color: 0x0A84FF       # blue when off
+            checked:
+              bg_color: 0x34C759    # green when on
+            widgets:
+              - label:
+                  text: "Living Two"
+                  align: CENTER
+                  text_color: 0xFFFFFF
+            on_click:
+              - if:
+                  condition:
+                    lambda: "return !id(syncing_living_two);"
+                  then:
+                    - homeassistant.action:
+                        action: light.toggle
+                        data:
+                          entity_id: light.living_two       # CHANGE ME
+
+        # ---- Bottom nav ----
+        - button:
+            align: BOTTOM_MID
+            x: -100
+            y: -10
+            width: 180
+            height: 44
+            widgets:
+              - label:
+                  text: "Climate  >"
+            on_click:
+              # Add "animation:"/"time:" here if you want a slide transition —
+              # left out because the exact enum names vary by ESPHome
+              # version; check the current lvgl docs (Actions > lvgl.page.show)
+              # if you want one.
+              - lambda: 'id(on_color_page) = false;'
+              - lvgl.page.show:
+                  id: climate_page
+
+        - button:
+            align: BOTTOM_MID
+            x: 100
+            y: -10
+            width: 180
+            height: 44
+            widgets:
+              - label:
+                  text: "Colors  >"
+            on_click:
+              - lambda: 'id(on_color_page) = true;'
+              - lvgl.page.show:
+                  id: color_page
+
+    # -------------------------------------------------------------- CLIMATE
+    - id: climate_page
+      bg_color: 0x000000
+      widgets:
+        - label:
+            text: "Bathroom Room Climate"
+            text_font: font_large
+            text_color: 0xFFFFFF
+            align: TOP_MID
+            y: 20
+
+        - arc:
+            id: temp_arc
+            x: 60
+            y: 140
+            width: 160
+            height: 160
+            min_value: 0
+            max_value: 40
+            value: 0
+            adjustable: false
+            arc_color: 0xFF9F0A
+        - label:
+            id: temp_value_label
+            text: "--°C"
+            text_font: font_large
+            text_color: 0xFFFFFF
+            align: TOP_LEFT
+            x: 100
+            y: 195
+        - label:
+            text: "Temperature"
+            text_font: font_small
+            text_color: 0x9A9A9E
+            align: TOP_LEFT
+            x: 90
+            y: 310
+
+        - arc:
+            id: humidity_arc
+            x: 580
+            y: 140
+            width: 160
+            height: 160
+            min_value: 0
+            max_value: 100
+            value: 0
+            adjustable: false
+            arc_color: 0x64D2FF
+        - label:
+            id: humidity_value_label
+            text: "--%"
+            text_font: font_large
+            text_color: 0xFFFFFF
+            align: TOP_LEFT
+            x: 620
+            y: 195
+        - label:
+            text: "Humidity"
+            text_font: font_small
+            text_color: 0x9A9A9E
+            align: TOP_LEFT
+            x: 620
+            y: 310
+
+        - button:
+            align: BOTTOM_MID
+            x: -100
+            y: -10
+            width: 180
+            height: 44
+            widgets:
+              - label:
+                  text: "<  Home"
+            on_click:
+              - lambda: 'id(on_color_page) = false;'
+              - lvgl.page.show:
+                  id: home_page
+
+        - button:
+            align: BOTTOM_MID
+            x: 100
+            y: -10
+            width: 180
+            height: 44
+            widgets:
+              - label:
+                  text: "Colors  >"
+            on_click:
+              - lambda: 'id(on_color_page) = true;'
+              - lvgl.page.show:
+                  id: color_page
+
+    # ---------------------------------------------------------------- COLORS
+    - id: color_page
+      bg_color: 0x000000
+      widgets:
+        - label:
+            text: "Color Cycle"
+            text_font: font_large
+            text_color: 0xFFFFFF
+            align: TOP_MID
+            y: 20
+
+        # ---- Color-cycling box (centered) ----
+        - obj:
+            id: color_box
+            align: CENTER
+            width: 200
+            height: 200
+            radius: 20
+            bg_color: 0xFF3B30
+
+        - button:
+            align: BOTTOM_MID
+            x: -100
+            y: -10
+            width: 180
+            height: 44
+            widgets:
+              - label:
+                  text: "<  Home"
+            on_click:
+              - lambda: 'id(on_color_page) = false;'
+              - lvgl.page.show:
+                  id: home_page
+
+        - button:
+            align: BOTTOM_MID
+            x: 100
+            y: -10
+            width: 180
+            height: 44
+            widgets:
+              - label:
+                  text: "<  Climate"
+            on_click:
+              - lambda: 'id(on_color_page) = false;'
+              - lvgl.page.show:
+                  id: climate_page
+
+# ---------------------------------------------------------------------------
+# Clock tick (1s) + date (30s) + color-cycling box (1s, but only while the
+# Colors page is actually on screen — see lv_scr_act() check below).
+# The TV Room status is event-driven via the test_hue_state binary_sensor's
+# on_state above, not polled here.
+# ---------------------------------------------------------------------------
+interval:
+  - interval: 1s
+    then:
+      - lvgl.label.update:
+          id: clock_label
+          text:
+            format: "%s"
+            args: ['id(ha_time).now().strftime("%H:%M:%S").c_str()']
+
+  - interval: 30s
+    then:
+      - lvgl.label.update:
+          id: date_label
+          text:
+            format: "%s"
+            args: ['id(ha_time).now().strftime("%A, %B %d").c_str()']
+
+  - interval: 1s
+    then:
+      - if:
+          # Only cycle colors (and only touch the LVGL redraw) while the
+          # Colors page is the one actually being shown. ESPHome's LVGL
+          # page ids aren't a plain lv_obj_t* (they're wrapped in
+          # LvPageType), so comparing against lv_scr_act() fails to compile
+          # ("comparison between distinct pointer types"). Tracking it
+          # ourselves in a bool global — set from each nav button's on_click
+          # — sidesteps that entirely and is what actually compiles.
+          condition:
+            lambda: 'return id(on_color_page);'
+          then:
+            - lambda: 'id(color_cycle_index) = (id(color_cycle_index) + 1) % 6;'
+            - if:
+                condition:
+                  lambda: 'return id(color_cycle_index) == 0;'
+                then:
+                  - lvgl.widget.update:
+                      id: color_box
+                      bg_color: 0xFF3B30
+            - if:
+                condition:
+                  lambda: 'return id(color_cycle_index) == 1;'
+                then:
+                  - lvgl.widget.update:
+                      id: color_box
+                      bg_color: 0xFF9500
+            - if:
+                condition:
+                  lambda: 'return id(color_cycle_index) == 2;'
+                then:
+                  - lvgl.widget.update:
+                      id: color_box
+                      bg_color: 0xFFCC00
+            - if:
+                condition:
+                  lambda: 'return id(color_cycle_index) == 3;'
+                then:
+                  - lvgl.widget.update:
+                      id: color_box
+                      bg_color: 0x34C759
+            - if:
+                condition:
+                  lambda: 'return id(color_cycle_index) == 4;'
+                then:
+                  - lvgl.widget.update:
+                      id: color_box
+                      bg_color: 0x0A84FF
+            - if:
+                condition:
+                  lambda: 'return id(color_cycle_index) == 5;'
+                then:
+                  - lvgl.widget.update:
+                      id: color_box
+                      bg_color: 0xAF52DE
