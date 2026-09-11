@@ -38,9 +38,16 @@ panel-test.local`) have been the most reliable way to see runtime output.
 
 - **Telnet (port 23) is not available on this receiver/firmware** — confirmed
   refused on a live probe. Everything below is plain HTTP instead.
-- Status: poll `GET /goform/formZone2_Zone2XmlStatus.xml` (Zone2/"Kitchen").
-  No push, so this is on a timer (every 2s) plus on-demand (page shown,
-  screen woken while already on the page) via a shared `script:`.
+- Status: poll `GET /goform/formZone2_Zone2XmlStatus.xml` (Zone2/"Kitchen"),
+  on a plain 2s timer only (`interval:` -> a shared `script:`). It runs
+  continuously in the background regardless of which page is showing, so by
+  the time you switch to the Denon page its widgets are already at most ~2s
+  stale - no need to poll again on page-select or on wake. Earlier revisions
+  *did* poll on page `on_load` and on wake-from-idle, which seemed like a
+  nice way to guarantee freshness - but `http_request.get` blocks the whole
+  event loop (touch + display included) until it returns, so those extra
+  polls turned page navigation and waking the screen into a multi-second
+  freeze. Removed; the periodic-only version has none of that.
 - Commands: `GET /goform/formiPhoneAppDirect.xml?<CMD>` for power
   (`Z2ON`/`Z2OFF`), volume (`Z2UP`/`Z2DOWN`, **1.0 dB per step** — verified
   live, not the 0.5 dB you'd guess from the Main Zone docs), and source

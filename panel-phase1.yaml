@@ -228,14 +228,6 @@ globals:
     type: float
     restore_value: yes
     initial_value: "0.80"
-  - id: on_denon_page
-    type: bool
-    restore_value: no
-    initial_value: "true"      # denon_page is the default/first page
-  - id: is_dimmed
-    type: bool
-    restore_value: no
-    initial_value: "false"
   - id: denon_vol_db
     type: float
     restore_value: no
@@ -331,17 +323,11 @@ touchscreen:
     address: 0x14
     update_interval: 20ms
     on_touch:
-      # waking from idle-dim while looking at the Denon page -> fresh poll
-      - if:
-          condition:
-            lambda: "return id(is_dimmed);"
-          then:
-            - lambda: "id(is_dimmed) = false;"
-            - if:
-                condition:
-                  lambda: "return id(on_denon_page);"
-                then:
-                  - script.execute: denon_poll_zone2
+      # NOTE: don't call denon_poll_zone2 (or anything using http_request.get)
+      # from here - it blocks the whole display/touch pipeline until the
+      # request returns, which made waking the screen feel like a freeze.
+      # The periodic interval below keeps Denon state fresh in the background
+      # regardless of which page is showing, so this isn't needed anyway.
       - light.turn_on:
           id: display_backlight
           brightness: !lambda "return id(bl_level);"
@@ -382,7 +368,6 @@ lvgl:
   on_idle:
     timeout: 45s
     then:
-      - lambda: "id(is_dimmed) = true;"
       - light.turn_on:
           id: display_backlight
           brightness: 12%
@@ -396,10 +381,12 @@ lvgl:
       height: 72
   pages:
     # ------------------------------------------------------------- DENON/KITCHEN
-    # Default page - this panel lives in the Kitchen.
+    # Default page - this panel lives in the Kitchen. No on_load poll here:
+    # the periodic interval (below) refreshes this page's widgets in the
+    # background continuously, whether it's the visible page or not, so the
+    # data showing when you switch to it is already at most ~2s stale -
+    # calling denon_poll_zone2 here too just blocked the page transition.
     - id: denon_page
-      on_load:
-        - script.execute: denon_poll_zone2
       widgets:
         - obj:
             width: 100%
@@ -541,7 +528,6 @@ lvgl:
                   widgets:
                     - label: { text: "Lights & Backlight >" }
                   on_click:
-                    - lambda: "id(on_denon_page) = false;"
                     - lvgl.page.show: main_page
 
     - id: main_page
@@ -648,5 +634,4 @@ lvgl:
                   widgets:
                     - label: { text: "< Denon (Kitchen)" }
                   on_click:
-                    - lambda: "id(on_denon_page) = true;"
                     - lvgl.page.show: denon_page
