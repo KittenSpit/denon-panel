@@ -90,6 +90,43 @@ esphome:
         - light.turn_on:
             id: display_backlight
             brightness: !lambda "return id(bl_level);"
+    # priority -100: after every component (incl. the IMU) is fully set up -
+    # register the pickup-wake listener on the QMI8658. See "motion:" below
+    # for the sensor config; this just wires its data into wake_panel.
+    - priority: -100
+      then:
+        - lambda: |-
+            id(panel_imu)->add_listener([](esphome::motion::MotionData &data) {
+              // Distinguish "picked up" from "tapped": at rest the combined
+              // acceleration vector reads ~1g regardless of orientation. A tap
+              // is a single sharp spike that settles back in one sample; being
+              // picked up keeps the reading away from 1g for a real stretch of
+              // time (the hand motion itself takes hundreds of ms minimum).
+              // So require several CONSECUTIVE over-threshold samples, not
+              // just one. Thresholds are a starting guess, not tuned to this
+              // board/mount yet - adjust after testing on the counter.
+              static uint8_t over_count = 0;
+              static uint32_t last_wake_ms = 0;
+              const float THRESH = 0.20f;        // g, deviation from resting 1g
+              const uint8_t NEED_SAMPLES = 4;     // consecutive, ~400ms @ 100ms update
+              const uint32_t COOLDOWN_MS = 3000;  // don't refire while still being handled
+
+              float ax = data.acceleration[0], ay = data.acceleration[1], az = data.acceleration[2];
+              float mag = sqrtf(ax * ax + ay * ay + az * az);
+              float dev = fabsf(mag - 1.0f);
+
+              if (dev > THRESH) {
+                if (over_count < 255) over_count++;
+              } else {
+                over_count = 0;
+              }
+
+              if (over_count >= NEED_SAMPLES && (millis() - last_wake_ms) > COOLDOWN_MS) {
+                over_count = 0;
+                last_wake_ms = millis();
+                id(wake_panel)->execute();
+              }
+            });
 
 esp32:
   board: esp32-s3-devkitc-1
@@ -145,10 +182,11 @@ http_request:
   follow_redirects: false   # never chase a second URL - we don't need the body
 
 # Poll logic lives in a script (mode: single, the default - a call that
-# arrives while one is still in flight is dropped rather than stacking up)
-# so it can be triggered on a timer AND on-demand: when the Denon page is
-# selected (page on_load) and when the screen wakes from idle-dim while
-# already on that page (touchscreen on_touch), not just every 2s.
+# arrives while one is still in flight is dropped rather than stacking up),
+# called only from the interval below (see the pause logic further down) -
+# deliberately NOT from page on_load or touch/wake, since http_request.get
+# blocks the whole display/touch pipeline and doing that from either of
+# those made page switches and waking the screen feel like a freeze.
 script:
   - id: denon_poll_zone2
     then:
@@ -218,10 +256,55 @@ script:
                   tag: "denon"
                   format: "Zone2 status request failed"
 
+  # Single source of truth for "wake the panel up" - called from a real touch
+  # AND from the IMU pickup listener. Never does a network call, so it can
+  # never freeze the display, and stays consistent between the two triggers.
+  - id: wake_panel
+    then:
+      - lambda: |-
+          id(is_dimmed) = false;
+          if (id(denon_polling_paused)) {
+            // polling had been paused for a while - the values on screen
+            // could be badly stale (hours, if it's been sitting off all day).
+            // Show honest placeholders instead of a misleading old snapshot;
+            // the next tick (already unpaused) fills them back in within ~2s.
+            lv_label_set_text(id(denon_status_label), "Kitchen: --");
+            lv_label_set_text(id(denon_input_label), "Input: --");
+            lv_label_set_text(id(denon_vol_label), "-- dB");
+            lv_label_set_text(id(denon_mute_label), "Mute: --");
+          }
+      - light.turn_on:
+          id: display_backlight
+          brightness: !lambda "return id(bl_level);"
+          transition_length: 120ms
+
+# Poll every 2s UNLESS the screen has been idle-dimmed AND Zone2 is off for
+# 30+ continuous seconds - no reason to hit the receiver for a dark screen
+# nobody's using. The 30s debounce means a brief off-then-back-on (e.g.
+# someone bumps the power switch) never actually pauses polling or triggers
+# the "--" placeholder reset on wake. If Zone2 is ON, polling never pauses,
+# even while dark, so a remote/app change is already reflected the instant
+# you look at the panel - no catch-up delay for the case that matters most.
 interval:
   - interval: 2s
     then:
-      - script.execute: denon_poll_zone2
+      - lambda: |-
+          bool zone2_off = !lv_obj_has_state(id(denon_power_switch), LV_STATE_CHECKED);
+          bool should_pause = id(is_dimmed) && zone2_off;
+          if (!should_pause) {
+            id(denon_pause_candidate_ms) = 0;
+            id(denon_polling_paused) = false;
+          } else {
+            if (id(denon_pause_candidate_ms) == 0)
+              id(denon_pause_candidate_ms) = millis();
+            if (millis() - id(denon_pause_candidate_ms) >= 30000)
+              id(denon_polling_paused) = true;
+          }
+      - if:
+          condition:
+            lambda: "return !id(denon_polling_paused);"
+          then:
+            - script.execute: denon_poll_zone2
 
 globals:
   - id: bl_level
@@ -236,6 +319,18 @@ globals:
     type: uint32_t
     restore_value: no
     initial_value: "0"         # millis() of the last local mute tap - see poll lambda
+  - id: is_dimmed
+    type: bool
+    restore_value: no
+    initial_value: "false"
+  - id: denon_polling_paused
+    type: bool
+    restore_value: no
+    initial_value: "false"
+  - id: denon_pause_candidate_ms
+    type: uint32_t
+    restore_value: no
+    initial_value: "0"
 
 # --- I2C: GPIO47 SDA / GPIO48 SCL. TCA9554 @ 0x20, GT911 @ 0x14 ---------------
 i2c:
@@ -249,6 +344,16 @@ pca9554:
   - id: expander
     i2c_id: bus_a
     address: 0x20
+
+# QMI8658 6-axis IMU (accel+gyro) @ 0x6B, on the same bus. Used only for
+# pickup-wake detection - see the on_boot listener above and wake_panel below.
+motion:
+  - platform: qmi8658
+    id: panel_imu
+    i2c_id: bus_a
+    address: 0x6B
+    update_interval: 100ms
+    accelerometer_range: 4G
 
 # software SPI over the expander, only used to give the 3 pins ids for the
 # on_boot bit-bang init above (CS=EXIO0, MOSI=EXIO1, CLK=EXIO2)
@@ -323,15 +428,7 @@ touchscreen:
     address: 0x14
     update_interval: 20ms
     on_touch:
-      # NOTE: don't call denon_poll_zone2 (or anything using http_request.get)
-      # from here - it blocks the whole display/touch pipeline until the
-      # request returns, which made waking the screen feel like a freeze.
-      # The periodic interval below keeps Denon state fresh in the background
-      # regardless of which page is showing, so this isn't needed anyway.
-      - light.turn_on:
-          id: display_backlight
-          brightness: !lambda "return id(bl_level);"
-          transition_length: 120ms
+      - script.execute: wake_panel
 
 # --- HA light state -> on-screen switches ---------------------------------
 # lvgl.widget.update of a switch's `checked` state does NOT re-fire its
@@ -368,6 +465,7 @@ lvgl:
   on_idle:
     timeout: 45s
     then:
+      - lambda: "id(is_dimmed) = true;"
       - light.turn_on:
           id: display_backlight
           brightness: 12%

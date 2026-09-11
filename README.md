@@ -64,6 +64,42 @@ panel-test.local`) have been the most reliable way to see runtime output.
   `follow_redirects: false`, since `http_request.get` blocks the whole
   event loop (touch + display included) while a request is in flight — worth
   keeping in mind if you see the UI freeze after a command.
+- **This receiver actually supports real push updates via UPnP/DLNA eventing**
+  (confirmed via SSDP: it advertises `RenderingControl`, `AVTransport`, and a
+  Denon-proprietary `X_WholeHomeAudio` service, each with a GENA `eventSubURL`
+  — this is how the official iPhone app gets near-instant updates with no
+  polling at all). The panel doesn't use this — it would need to run its own
+  tiny embedded HTTP server to receive `NOTIFY` callbacks, handle the
+  `SUBSCRIBE`/renew handshake, and reverse-engineer `X_WholeHomeAudio`'s
+  (undocumented) event XML - real engineering, not something ESPHome has a
+  component for. Noted as a "someday" idea; polling is what's actually built.
+
+## Screen power management
+
+- Idle timeout: 45s of no touch dims the backlight to 12%.
+- **Denon polling pauses while idle**, but only once the screen has been
+  dimmed *and* Zone2 has been off continuously for 30+ seconds (`interval:`
+  lambda + `denon_pause_candidate_ms`/`denon_polling_paused` globals). A
+  brief off-then-back-on never crosses that threshold, so it never touches
+  the pause state. If Zone2 is on, polling never pauses regardless of screen
+  state — a remote/app change is already reflected the instant you look at
+  the panel, no catch-up delay.
+- **Wake resets stale display to placeholders**: if polling had been paused
+  (screen could've been dark for hours), waking blanks the four Denon labels
+  to `"Kitchen: --"` / `"Input: --"` / `"-- dB"` / `"Mute: --"` instead of
+  showing a possibly very-wrong old snapshot; the next poll (≤2s later)
+  fills them back in. This logic lives once in the `wake_panel` script, used
+  by both wake triggers below, so they can't drift out of sync.
+- **Two wake triggers**: touch, and picking the panel up. The QMI8658 IMU
+  (`motion: platform: qmi8658`, same chip used for the `X_WholeHomeAudio`-
+  unrelated onboard sensors) is polled every 100ms; a pickup is detected as
+  4+ *consecutive* samples with combined acceleration deviating >0.20g from
+  resting (1g) — a tap is a single-sample spike that can't sustain that long,
+  a real pickup easily does. 3s cooldown after firing. **These thresholds are
+  an untested starting guess**, not tuned against the real hardware/mount —
+  expect to adjust the constants in the `on_boot: priority: -100` lambda
+  after testing (too sensitive: raise `THRESH` or `NEED_SAMPLES`; not
+  sensitive enough: lower them).
 
 ## Build
 
@@ -83,6 +119,8 @@ esphome run panel-phase1.yaml --device panel-test.local          # OTA after tha
 - **Phase 2 (done):** direct Denon Zone2/Kitchen control over HTTP (see above).
 - **Phase 3 (idea):** Main Zone ("Basement") and/or Zone3 ("Out-Bath")
   controls; more HA widgets (rooms/status) as wanted.
+- **Phase 4 (idea, bigger lift):** replace HTTP polling with real UPnP/GENA
+  event subscriptions (see above) for instant, zero-poll updates.
 
 ## History notes
 
