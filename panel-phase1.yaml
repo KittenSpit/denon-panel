@@ -23,7 +23,7 @@ esphome:
   name: ${name}
   friendly_name: ${friendly_name}
   includes:
-    - denon_http.h
+    - denon_async.h
   on_boot:
     # priority 200: right after pca9554 (250) - bit-bang the ST7701S init
     # through the expander (CS=EXIO0, MOSI=EXIO1, CLK=EXIO2) because ESPHome's
@@ -95,6 +95,12 @@ esphome:
     # for the sensor config; this just wires its data into wake_panel.
     - priority: -100
       then:
+        # Starts the CPU1 background task that owns all Denon Zone2 network
+        # I/O (status polling + fire-and-forget commands). See denon_async.h -
+        # this is what makes neither polling nor a button tap ever block
+        # touch/display, since ESPHome's own main loop is pinned to CPU0
+        # (confirmed via this project's build sdkconfig).
+        - lambda: 'denon_async_init("${denon_ip}");'
         - lambda: |-
             id(panel_imu)->add_listener([](esphome::motion::MotionData &data) {
               // Distinguish "picked up" from "tapped": at rest the combined
@@ -173,97 +179,67 @@ time:
 # --- Direct Denon AVR-3312CI control (Zone2 / Kitchen) - no HA involved -----
 # Talks straight to the receiver's goform HTTP API (telnet/port 23 is NOT
 # available on this unit - confirmed by live probe, connection refused there
-# while port 80 answers fine). Status is polled since HTTP has no push;
-# commands are fire-and-forget GETs. See denon_http.h for the XML helper.
-http_request:
-  id: denon_http
-  useragent: esphome-denon-panel
-  timeout: 2s          # bounds how long a stalled request can freeze touch/display
-  follow_redirects: false   # never chase a second URL - we don't need the body
-
-# Poll logic lives in a script (mode: single, the default - a call that
-# arrives while one is still in flight is dropped rather than stacking up),
-# called only from the interval below (see the pause logic further down) -
-# deliberately NOT from page on_load or touch/wake, since http_request.get
-# blocks the whole display/touch pipeline and doing that from either of
-# those made page switches and waking the screen feel like a freeze.
-script:
-  - id: denon_poll_zone2
+# while port 80 answers fine).
+#
+# All the actual network I/O (status polling AND fire-and-forget commands)
+# runs on a dedicated FreeRTOS task pinned to CPU1 - see denon_async.h. This
+# panel's ESPHome main loop (LVGL, touch, everything below) is pinned to
+# CPU0 by default (confirmed via this build's sdkconfig), so the two run in
+# genuine parallel: no blocking network call, however slow, ever delays a
+# touch or a redraw. Earlier revisions used ESPHome's http_request component
+# directly from the main loop/interval, which blocks the whole display/touch
+# pipeline for the duration of each call - that's what caused the page
+# switches, wake-ups, and multi-tap-needed button presses this replaces.
+#
+# This fast interval just asks the background task "is there new data yet?"
+# (a mutex-protected copy, microseconds, no network) and updates the LVGL
+# widgets if so - the only thing here that's allowed to touch LVGL, since
+# LVGL itself isn't thread-safe and must only ever be touched from this
+# main-loop context.
+interval:
+  - interval: 250ms
     then:
-      - http_request.get:
-          url: "http://${denon_ip}/goform/formZone2_Zone2XmlStatus.xml"
-          capture_response: true
-          on_response:
-            then:
-              - lambda: |-
-                  if (response->status_code != 200) return;
-                  std::string power = denon_xml_extract(body, "Power");
-                  std::string input = denon_xml_extract(body, "InputFuncSelect");
-                  std::string vol   = denon_xml_extract(body, "MasterVolume");
-                  std::string mute  = denon_xml_extract(body, "Mute");
-                  // <Mute> is reliable as long as it was SET via
-                  // MainZone/index.put.asp?cmd0=PutVolumeMute/ON|OFF&ZoneName=ZONE2
-                  // (verified live) - the formiPhoneAppDirect.xml?Z2MUON/OFF codes
-                  // do NOT actually flip this flag on this receiver/firmware.
-                  if (power.empty()) return;  // malformed/short read - skip this cycle
+      - lambda: |-
+          DenonStatus st;
+          if (!denon_async_poll_status(&st)) return;
 
-                  lv_label_set_text(id(denon_status_label),
-                      (std::string("Kitchen: ") + power).c_str());
-                  lv_label_set_text(id(denon_input_label),
-                      (std::string("Input: ") + input).c_str());
+          lv_label_set_text(id(denon_status_label),
+              (std::string("Kitchen: ") + (st.power_on ? "ON" : "OFF")).c_str());
+          lv_label_set_text(id(denon_input_label),
+              (std::string("Input: ") + st.input).c_str());
 
-                  bool is_on = (power == "ON");
-                  if (is_on) lv_obj_add_state(id(denon_power_switch), LV_STATE_CHECKED);
-                  else lv_obj_clear_state(id(denon_power_switch), LV_STATE_CHECKED);
+          if (st.power_on) lv_obj_add_state(id(denon_power_switch), LV_STATE_CHECKED);
+          else lv_obj_clear_state(id(denon_power_switch), LV_STATE_CHECKED);
 
-                  // Skip mute sync for a few seconds after a local tap: the
-                  // receiver needs a moment to actually update this field, and
-                  // an unlucky poll landing in that window was flipping the
-                  // display back before the real state caught up (confirmed
-                  // live). Anything past the grace window is trusted normally,
-                  // so a remote/app-driven mute change still gets picked up.
-                  if (millis() - id(denon_mute_action_ms) > 3000) {
-                    bool is_muted = (mute == "on");
-                    if (is_muted) lv_obj_add_state(id(denon_mute_switch), LV_STATE_CHECKED);
-                    else lv_obj_clear_state(id(denon_mute_switch), LV_STATE_CHECKED);
-                    lv_label_set_text(id(denon_mute_label), is_muted ? "Mute: ON" : "Mute: OFF");
-                  }
+          if (st.mute_on) lv_obj_add_state(id(denon_mute_switch), LV_STATE_CHECKED);
+          else lv_obj_clear_state(id(denon_mute_switch), LV_STATE_CHECKED);
+          lv_label_set_text(id(denon_mute_label), st.mute_on ? "Mute: ON" : "Mute: OFF");
 
-                  // keep the source dropdown in sync with whatever input is
-                  // actually active (remote/app changes it too, not just here)
-                  static const char *const denon_sources[] = {
-                      "TUNER", "HDRADIO", "CD", "PHONO", "NET/USB", "DVD", "BD",
-                      "TV", "SAT/CBL", "DVR", "DOCK", "GAME2", "GAME", "V.AUX"};
-                  for (int i = 0; i < 14; i++) {
-                    if (input == denon_sources[i]) {
-                      id(denon_source_dd)->set_selected_index(i, LV_ANIM_OFF);
-                      break;
-                    }
-                  }
+          static const char *const denon_sources[] = {
+              "TUNER", "HDRADIO", "CD", "PHONO", "NET/USB", "DVD", "BD",
+              "TV", "SAT/CBL", "DVR", "DOCK", "GAME2", "GAME", "V.AUX"};
+          for (int i = 0; i < 14; i++) {
+            if (strcmp(st.input, denon_sources[i]) == 0) {
+              id(denon_source_dd)->set_selected_index(i, LV_ANIM_OFF);
+              break;
+            }
+          }
 
-                  if (!vol.empty()) {
-                    float v = atof(vol.c_str());
-                    id(denon_vol_db) = v;
-                    char buf[16];
-                    snprintf(buf, sizeof(buf), "%.1f dB", v);
-                    lv_label_set_text(id(denon_vol_label), buf);
-                    lv_bar_set_value(id(denon_vol_bar), (int) v, LV_ANIM_OFF);
-                  }
-          on_error:
-            then:
-              - logger.log:
-                  level: WARN
-                  tag: "denon"
-                  format: "Zone2 status request failed"
+          id(denon_vol_db) = st.volume_db;
+          char buf[16];
+          snprintf(buf, sizeof(buf), "%.1f dB", st.volume_db);
+          lv_label_set_text(id(denon_vol_label), buf);
+          lv_bar_set_value(id(denon_vol_bar), (int) st.volume_db, LV_ANIM_OFF);
 
   # Single source of truth for "wake the panel up" - called from a real touch
   # AND from the IMU pickup listener. Never does a network call, so it can
   # never freeze the display, and stays consistent between the two triggers.
+script:
   - id: wake_panel
     then:
       - lambda: |-
-          id(is_dimmed) = false;
-          if (id(denon_polling_paused)) {
+          denon_async_set_screen_dimmed(false);
+          if (denon_async_was_paused()) {
             // polling had been paused for a while - the values on screen
             // could be badly stale (hours, if it's been sitting off all day).
             // Show honest placeholders instead of a misleading old snapshot;
@@ -278,34 +254,6 @@ script:
           brightness: !lambda "return id(bl_level);"
           transition_length: 120ms
 
-# Poll every 2s UNLESS the screen has been idle-dimmed AND Zone2 is off for
-# 30+ continuous seconds - no reason to hit the receiver for a dark screen
-# nobody's using. The 30s debounce means a brief off-then-back-on (e.g.
-# someone bumps the power switch) never actually pauses polling or triggers
-# the "--" placeholder reset on wake. If Zone2 is ON, polling never pauses,
-# even while dark, so a remote/app change is already reflected the instant
-# you look at the panel - no catch-up delay for the case that matters most.
-interval:
-  - interval: 2s
-    then:
-      - lambda: |-
-          bool zone2_off = !lv_obj_has_state(id(denon_power_switch), LV_STATE_CHECKED);
-          bool should_pause = id(is_dimmed) && zone2_off;
-          if (!should_pause) {
-            id(denon_pause_candidate_ms) = 0;
-            id(denon_polling_paused) = false;
-          } else {
-            if (id(denon_pause_candidate_ms) == 0)
-              id(denon_pause_candidate_ms) = millis();
-            if (millis() - id(denon_pause_candidate_ms) >= 30000)
-              id(denon_polling_paused) = true;
-          }
-      - if:
-          condition:
-            lambda: "return !id(denon_polling_paused);"
-          then:
-            - script.execute: denon_poll_zone2
-
 globals:
   - id: bl_level
     type: float
@@ -315,22 +263,6 @@ globals:
     type: float
     restore_value: no
     initial_value: "-50.0"     # placeholder until the first poll lands
-  - id: denon_mute_action_ms
-    type: uint32_t
-    restore_value: no
-    initial_value: "0"         # millis() of the last local mute tap - see poll lambda
-  - id: is_dimmed
-    type: bool
-    restore_value: no
-    initial_value: "false"
-  - id: denon_polling_paused
-    type: bool
-    restore_value: no
-    initial_value: "false"
-  - id: denon_pause_candidate_ms
-    type: uint32_t
-    restore_value: no
-    initial_value: "0"
 
 # --- I2C: GPIO47 SDA / GPIO48 SCL. TCA9554 @ 0x20, GT911 @ 0x14 ---------------
 i2c:
@@ -465,7 +397,7 @@ lvgl:
   on_idle:
     timeout: 45s
     then:
-      - lambda: "id(is_dimmed) = true;"
+      - lambda: "denon_async_set_screen_dimmed(true);"
       - light.turn_on:
           id: display_backlight
           brightness: 12%
@@ -480,10 +412,10 @@ lvgl:
   pages:
     # ------------------------------------------------------------- DENON/KITCHEN
     # Default page - this panel lives in the Kitchen. No on_load poll here:
-    # the periodic interval (below) refreshes this page's widgets in the
-    # background continuously, whether it's the visible page or not, so the
-    # data showing when you switch to it is already at most ~2s stale -
-    # calling denon_poll_zone2 here too just blocked the page transition.
+    # the fast interval (above) refreshes this page's widgets in the
+    # background continuously - driven by the CPU1 task's own poll cycle,
+    # not by page visibility - so the data showing when you switch to it is
+    # already at most ~2s stale, and switching pages never blocks on network.
     - id: denon_page
       widgets:
         - obj:
@@ -539,9 +471,9 @@ lvgl:
                           - if:
                               condition: { lambda: "return x;" }
                               then:
-                                - http_request.get: { url: "http://${denon_ip}/goform/formiPhoneAppDirect.xml?Z2ON" }
+                                - lambda: 'denon_async_send_command("/goform/formiPhoneAppDirect.xml?Z2ON");'
                               else:
-                                - http_request.get: { url: "http://${denon_ip}/goform/formiPhoneAppDirect.xml?Z2OFF" }
+                                - lambda: 'denon_async_send_command("/goform/formiPhoneAppDirect.xml?Z2OFF");'
 
               - obj:
                   styles: row
@@ -556,14 +488,14 @@ lvgl:
                         id: denon_mute_switch
                         on_value:
                           - lambda: |-
-                              id(denon_mute_action_ms) = millis();
+                              denon_async_note_local_mute_action();
                               lv_label_set_text(id(denon_mute_label), x ? "Mute: ON" : "Mute: OFF");
                           - if:
                               condition: { lambda: "return x;" }
                               then:
-                                - http_request.get: { url: "http://${denon_ip}/MainZone/index.put.asp?cmd0=PutVolumeMute/ON&ZoneName=ZONE2" }
+                                - lambda: 'denon_async_send_command("/MainZone/index.put.asp?cmd0=PutVolumeMute/ON&ZoneName=ZONE2");'
                               else:
-                                - http_request.get: { url: "http://${denon_ip}/MainZone/index.put.asp?cmd0=PutVolumeMute/OFF&ZoneName=ZONE2" }
+                                - lambda: 'denon_async_send_command("/MainZone/index.put.asp?cmd0=PutVolumeMute/OFF&ZoneName=ZONE2");'
 
               - obj:
                   width: 100%
@@ -585,7 +517,7 @@ lvgl:
                               snprintf(buf, sizeof(buf), "%.1f dB", id(denon_vol_db));
                               lv_label_set_text(id(denon_vol_label), buf);
                               lv_bar_set_value(id(denon_vol_bar), (int) id(denon_vol_db), LV_ANIM_OFF);
-                          - http_request.get: { url: "http://${denon_ip}/goform/formiPhoneAppDirect.xml?Z2DOWN" }
+                          - lambda: 'denon_async_send_command("/goform/formiPhoneAppDirect.xml?Z2DOWN");'
                     - button:
                         widgets: [{ label: { text: "Vol +" } }]
                         on_click:
@@ -595,7 +527,7 @@ lvgl:
                               snprintf(buf, sizeof(buf), "%.1f dB", id(denon_vol_db));
                               lv_label_set_text(id(denon_vol_label), buf);
                               lv_bar_set_value(id(denon_vol_bar), (int) id(denon_vol_db), LV_ANIM_OFF);
-                          - http_request.get: { url: "http://${denon_ip}/goform/formiPhoneAppDirect.xml?Z2UP" }
+                          - lambda: 'denon_async_send_command("/goform/formiPhoneAppDirect.xml?Z2UP");'
 
               - label:
                   text: "Source"
@@ -619,8 +551,9 @@ lvgl:
                     - "GAME"
                     - "V.AUX"
                   on_value:
-                    - http_request.get:
-                        url: !lambda 'return std::string("http://${denon_ip}/goform/formiPhoneAppDirect.xml?Z2") + text;'
+                    - lambda: |-
+                        std::string path = std::string("/goform/formiPhoneAppDirect.xml?Z2") + text;
+                        denon_async_send_command(path.c_str());
 
               - button:
                   widgets:
