@@ -208,12 +208,11 @@ interval:
           lv_label_set_text(id(denon_input_label),
               (std::string("Input: ") + st.input).c_str());
 
-          if (st.power_on) lv_obj_add_state(id(denon_power_switch), LV_STATE_CHECKED);
-          else lv_obj_clear_state(id(denon_power_switch), LV_STATE_CHECKED);
+          if (st.power_on) lv_obj_add_state(id(denon_power_btn), LV_STATE_CHECKED);
+          else lv_obj_clear_state(id(denon_power_btn), LV_STATE_CHECKED);
 
-          if (st.mute_on) lv_obj_add_state(id(denon_mute_switch), LV_STATE_CHECKED);
-          else lv_obj_clear_state(id(denon_mute_switch), LV_STATE_CHECKED);
-          lv_label_set_text(id(denon_mute_label), st.mute_on ? "Mute: ON" : "Mute: OFF");
+          if (st.mute_on) lv_obj_add_state(id(denon_mute_btn), LV_STATE_CHECKED);
+          else lv_obj_clear_state(id(denon_mute_btn), LV_STATE_CHECKED);
 
           static const char *const denon_sources[] = {
               "TUNER", "HDRADIO", "CD", "PHONO", "NET/USB", "DVD", "BD",
@@ -247,7 +246,6 @@ script:
             lv_label_set_text(id(denon_status_label), "Kitchen: --");
             lv_label_set_text(id(denon_input_label), "Input: --");
             lv_label_set_text(id(denon_vol_label), "-- dB");
-            lv_label_set_text(id(denon_mute_label), "Mute: --");
           }
       - light.turn_on:
           id: display_backlight
@@ -265,6 +263,21 @@ globals:
     initial_value: "-50.0"     # placeholder until the first poll lands
 
 # --- I2C: GPIO47 SDA / GPIO48 SCL. TCA9554 @ 0x20, GT911 @ 0x14 ---------------
+# TRIED lowering this to 10kHz, matching a fix confirmed live on the sister
+# ha-panel-4-3b project (same touch+IO-expander bus-sharing rationale) -
+# DO NOT do this on the 4B board's config. It bricked the boot: this board's
+# on_boot ST7701S init (above) bit-bangs ~195 SPI bytes - roughly 5,500
+# individual pin toggles - straight through this same i2c-controlled
+# expander, not real SPI hardware. At 100kHz that's ~1.5s; at 10kHz it's
+# ~15s, which blew through the boot watchdog before WiFi/API ever came up.
+# ESPHome's own safe_mode caught the resulting crash loop and auto-rolled
+# back to the last known-good OTA partition (confirmed live via
+# "OTA rollback detected!" in the logs) - exactly the safety net it's for,
+# but a real value only if we stop tripping it. The 4.3B project doesn't
+# have this same bit-banged-SPI-over-i2c boot cost, so its fix doesn't carry
+# over here as-is; leaving this at the default until a boot-safe alternative
+# (e.g. a smaller frequency cut, or raising the boot watchdog timeout to
+# match) is tried and actually verified to survive a full reboot.
 i2c:
   - id: bus_a
     sda: GPIO47
@@ -459,17 +472,29 @@ lvgl:
                   layout:
                     type: flex
                     flex_flow: row
-                    flex_align_main: space_between
+                    flex_align_main: center
                     flex_align_cross: center
                   widgets:
-                    - label: { text: "Power", text_color: 0xE2E8F0 }
-                    - switch:
-                        id: denon_power_switch
-                        on_value:
+                    # Toggle button instead of a switch - color IS the state:
+                    # neutral gray off, green when the receiver reports ON.
+                    - button:
+                        id: denon_power_btn
+                        checkable: true
+                        width: 90%
+                        height: 100%
+                        bg_color: 0x2A2A2E
+                        checked:
+                          bg_color: 0x16A34A
+                        pressed:
+                          bg_opa: 70%
+                        widgets:
+                          - label: { text: "Power", text_color: 0xE2E8F0 }
+                        on_click:
                           - lambda: |-
-                              lv_label_set_text(id(denon_status_label), x ? "Kitchen: ON" : "Kitchen: OFF");
+                              bool on = lv_obj_has_state(id(denon_power_btn), LV_STATE_CHECKED);
+                              lv_label_set_text(id(denon_status_label), on ? "Kitchen: ON" : "Kitchen: OFF");
                           - if:
-                              condition: { lambda: "return x;" }
+                              condition: { lambda: "return lv_obj_has_state(id(denon_power_btn), LV_STATE_CHECKED);" }
                               then:
                                 - lambda: 'denon_async_send_command("/goform/formiPhoneAppDirect.xml?Z2ON");'
                               else:
@@ -480,18 +505,28 @@ lvgl:
                   layout:
                     type: flex
                     flex_flow: row
-                    flex_align_main: space_between
+                    flex_align_main: center
                     flex_align_cross: center
                   widgets:
-                    - label: { id: denon_mute_label, text: "Mute: --", text_color: 0xE2E8F0 }
-                    - switch:
-                        id: denon_mute_switch
-                        on_value:
+                    # Same pattern as Power - neutral gray off, red when muted.
+                    - button:
+                        id: denon_mute_btn
+                        checkable: true
+                        width: 90%
+                        height: 100%
+                        bg_color: 0x2A2A2E
+                        checked:
+                          bg_color: 0xDC2626
+                        pressed:
+                          bg_opa: 70%
+                        widgets:
+                          - label: { text: "Mute", text_color: 0xE2E8F0 }
+                        on_click:
                           - lambda: |-
-                              denon_async_note_local_mute_action(x);
-                              lv_label_set_text(id(denon_mute_label), x ? "Mute: ON" : "Mute: OFF");
+                              bool muted = lv_obj_has_state(id(denon_mute_btn), LV_STATE_CHECKED);
+                              denon_async_note_local_mute_action(muted);
                           - if:
-                              condition: { lambda: "return x;" }
+                              condition: { lambda: "return lv_obj_has_state(id(denon_mute_btn), LV_STATE_CHECKED);" }
                               then:
                                 - lambda: 'denon_async_send_command("/MainZone/index.put.asp?cmd0=PutVolumeMute/ON&ZoneName=ZONE2");'
                               else:
@@ -509,6 +544,8 @@ lvgl:
                     flex_align_cross: center
                   widgets:
                     - button:
+                        pressed:
+                          bg_opa: 50%
                         widgets: [{ label: { text: "Vol -" } }]
                         on_click:
                           - lambda: |-
@@ -519,6 +556,8 @@ lvgl:
                               lv_bar_set_value(id(denon_vol_bar), (int) id(denon_vol_db), LV_ANIM_OFF);
                           - lambda: 'denon_async_send_command("/goform/formiPhoneAppDirect.xml?Z2DOWN");'
                     - button:
+                        pressed:
+                          bg_opa: 50%
                         widgets: [{ label: { text: "Vol +" } }]
                         on_click:
                           - lambda: |-
