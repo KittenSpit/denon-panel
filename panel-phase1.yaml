@@ -502,7 +502,7 @@ lvgl:
                         pressed:
                           bg_opa: 70%
                         widgets:
-                          - label: { text: "Power", text_color: 0xE2E8F0 }
+                          - label: { text: "Power", text_color: 0xE2E8F0, align: center }
                         on_click:
                           - lambda: |-
                               bool on = lv_obj_has_state(id(denon_power_btn), LV_STATE_CHECKED);
@@ -534,17 +534,35 @@ lvgl:
                         pressed:
                           bg_opa: 70%
                         widgets:
-                          - label: { text: "Mute", text_color: 0xE2E8F0 }
+                          - label: { text: "Mute", text_color: 0xE2E8F0, align: center }
                         on_click:
-                          - lambda: |-
-                              bool muted = lv_obj_has_state(id(denon_mute_btn), LV_STATE_CHECKED);
-                              denon_async_note_local_mute_action(muted);
+                          # Mute/Vol are no-ops on the receiver while Zone2 is
+                          # off - sending them anyway just made the next poll
+                          # reset our optimistic UI change a moment later
+                          # (this button flashing red then bouncing back).
+                          # Skip entirely while off, including undoing the
+                          # CHECKED-state flip LVGL's checkable button already
+                          # applied before this handler ever runs, so the
+                          # button never visually changes when it's not
+                          # actually going to do anything.
                           - if:
-                              condition: { lambda: "return lv_obj_has_state(id(denon_mute_btn), LV_STATE_CHECKED);" }
+                              condition: { lambda: "return lv_obj_has_state(id(denon_power_btn), LV_STATE_CHECKED);" }
                               then:
-                                - lambda: 'denon_async_send_command("/MainZone/index.put.asp?cmd0=PutVolumeMute/ON&ZoneName=ZONE2");'
+                                - lambda: |-
+                                    bool muted = lv_obj_has_state(id(denon_mute_btn), LV_STATE_CHECKED);
+                                    denon_async_note_local_mute_action(muted);
+                                - if:
+                                    condition: { lambda: "return lv_obj_has_state(id(denon_mute_btn), LV_STATE_CHECKED);" }
+                                    then:
+                                      - lambda: 'denon_async_send_command("/MainZone/index.put.asp?cmd0=PutVolumeMute/ON&ZoneName=ZONE2");'
+                                    else:
+                                      - lambda: 'denon_async_send_command("/MainZone/index.put.asp?cmd0=PutVolumeMute/OFF&ZoneName=ZONE2");'
                               else:
-                                - lambda: 'denon_async_send_command("/MainZone/index.put.asp?cmd0=PutVolumeMute/OFF&ZoneName=ZONE2");'
+                                - lambda: |-
+                                    if (lv_obj_has_state(id(denon_mute_btn), LV_STATE_CHECKED))
+                                      lv_obj_clear_state(id(denon_mute_btn), LV_STATE_CHECKED);
+                                    else
+                                      lv_obj_add_state(id(denon_mute_btn), LV_STATE_CHECKED);
 
               - obj:
                   width: 100%
@@ -560,27 +578,37 @@ lvgl:
                     - button:
                         pressed:
                           bg_opa: 50%
-                        widgets: [{ label: { text: "Vol -" } }]
+                        widgets: [{ label: { text: "Vol -", align: center } }]
                         on_click:
-                          - lambda: |-
-                              id(denon_vol_db) -= 1.0f;   // verified live: Z2DOWN/Z2UP step 1.0dB, not 0.5
-                              char buf[16];
-                              snprintf(buf, sizeof(buf), "%.1f dB", id(denon_vol_db));
-                              lv_label_set_text(id(denon_vol_label), buf);
-                              lv_bar_set_value(id(denon_vol_bar), (int) id(denon_vol_db), LV_ANIM_OFF);
-                          - lambda: 'denon_async_send_command("/goform/formiPhoneAppDirect.xml?Z2DOWN");'
+                          # Skip entirely while Zone2 is off - see the Mute
+                          # button comment above, same reasoning: no-op on
+                          # the receiver, and the optimistic dB/bar update
+                          # would just get reset back by the next poll.
+                          - if:
+                              condition: { lambda: "return lv_obj_has_state(id(denon_power_btn), LV_STATE_CHECKED);" }
+                              then:
+                                - lambda: |-
+                                    id(denon_vol_db) -= 1.0f;   // verified live: Z2DOWN/Z2UP step 1.0dB, not 0.5
+                                    char buf[16];
+                                    snprintf(buf, sizeof(buf), "%.1f dB", id(denon_vol_db));
+                                    lv_label_set_text(id(denon_vol_label), buf);
+                                    lv_bar_set_value(id(denon_vol_bar), (int) id(denon_vol_db), LV_ANIM_OFF);
+                                - lambda: 'denon_async_send_command("/goform/formiPhoneAppDirect.xml?Z2DOWN");'
                     - button:
                         pressed:
                           bg_opa: 50%
-                        widgets: [{ label: { text: "Vol +" } }]
+                        widgets: [{ label: { text: "Vol +", align: center } }]
                         on_click:
-                          - lambda: |-
-                              id(denon_vol_db) += 1.0f;   // verified live: Z2DOWN/Z2UP step 1.0dB, not 0.5
-                              char buf[16];
-                              snprintf(buf, sizeof(buf), "%.1f dB", id(denon_vol_db));
-                              lv_label_set_text(id(denon_vol_label), buf);
-                              lv_bar_set_value(id(denon_vol_bar), (int) id(denon_vol_db), LV_ANIM_OFF);
-                          - lambda: 'denon_async_send_command("/goform/formiPhoneAppDirect.xml?Z2UP");'
+                          - if:
+                              condition: { lambda: "return lv_obj_has_state(id(denon_power_btn), LV_STATE_CHECKED);" }
+                              then:
+                                - lambda: |-
+                                    id(denon_vol_db) += 1.0f;   // verified live: Z2DOWN/Z2UP step 1.0dB, not 0.5
+                                    char buf[16];
+                                    snprintf(buf, sizeof(buf), "%.1f dB", id(denon_vol_db));
+                                    lv_label_set_text(id(denon_vol_label), buf);
+                                    lv_bar_set_value(id(denon_vol_bar), (int) id(denon_vol_db), LV_ANIM_OFF);
+                                - lambda: 'denon_async_send_command("/goform/formiPhoneAppDirect.xml?Z2UP");'
 
               - label:
                   text: "Source"
@@ -621,12 +649,34 @@ lvgl:
                     flex_align_main: center
                     flex_align_cross: center
                   widgets:
+                    # Touch target (this button) stays full row height -
+                    # already confirmed live at ~71px, plenty forgiving.
+                    # What actually changes here is purely visual: the
+                    # button itself is invisible (bg_opa: 0%) and a smaller
+                    # decorative box inside it, anchored to the TOP, is the
+                    # only thing painted - so the visible "button" looks
+                    # about half as tall, top edge unchanged, while the real
+                    # tappable area underneath (including the now-blank
+                    # lower half) stays exactly as generous as before. Taps
+                    # landing in that blank lower area still register - the
+                    # inner box is a plain, non-clickable obj, so LVGL
+                    # resolves the click to this outer button either way.
                     - button:
                         id: nav_lights_btn
                         width: 90%
                         height: 100%
+                        bg_opa: 0%
+                        border_width: 0
                         widgets:
-                          - label: { text: "Lights & Backlight >" }
+                          - obj:
+                              width: 100%
+                              height: 50%
+                              align: top_mid
+                              bg_color: 0x2A2A2E
+                              radius: 6
+                              border_width: 0
+                              widgets:
+                                - label: { text: "Lights & Backlight >", text_color: 0xE2E8F0, align: center }
                         on_click:
                           - lvgl.page.show: main_page
 
@@ -678,7 +728,7 @@ lvgl:
                         pressed:
                           bg_opa: 70%
                         widgets:
-                          - label: { text: "Living Two", text_color: 0xE2E8F0, text_font: montserrat_14 }
+                          - label: { text: "Living Two", text_color: 0xE2E8F0, text_font: montserrat_14, align: center }
                         on_click:
                           - if:
                               condition: { lambda: "return lv_obj_has_state(id(btn_living_two), LV_STATE_CHECKED);" }
@@ -703,7 +753,7 @@ lvgl:
                         pressed:
                           bg_opa: 70%
                         widgets:
-                          - label: { text: "Test Hue White", text_color: 0xE2E8F0, text_font: montserrat_14 }
+                          - label: { text: "Test Hue White", text_color: 0xE2E8F0, text_font: montserrat_14, align: center }
                         on_click:
                           - if:
                               condition: { lambda: "return lv_obj_has_state(id(btn_hue_white), LV_STATE_CHECKED);" }
@@ -748,11 +798,23 @@ lvgl:
                     flex_align_main: center
                     flex_align_cross: center
                   widgets:
+                    # Same top-anchored-visual / full-height-touch-target
+                    # treatment as the Lights nav button - see its comment.
                     - button:
                         id: nav_denon_btn
                         width: 90%
                         height: 100%
+                        bg_opa: 0%
+                        border_width: 0
                         widgets:
-                          - label: { text: "< Denon (Kitchen)" }
+                          - obj:
+                              width: 100%
+                              height: 50%
+                              align: top_mid
+                              bg_color: 0x2A2A2E
+                              radius: 6
+                              border_width: 0
+                              widgets:
+                                - label: { text: "< Denon (Kitchen)", text_color: 0xE2E8F0, align: center }
                         on_click:
                           - lvgl.page.show: denon_page
