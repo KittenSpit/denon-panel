@@ -133,7 +133,6 @@ esphome:
                 id(wake_panel)->execute();
               }
             });
-
 esp32:
   board: esp32-s3-devkitc-1
   variant: esp32s3
@@ -423,10 +422,18 @@ lvgl:
           brightness: 12%
           transition_length: 1s
   style_definitions:
+    # pad_all was 6 - confirmed live (via lv_obj_get_coords on the actual
+    # rendered Power/Mute buttons) that this shrinks each button's real
+    # touch target to just 59px of its 72px row, AND stacks up with the
+    # page's own inter-row flex gap to leave a 19px unclickable dead zone
+    # between adjacent buttons - exactly matching the "top of button works,
+    # bottom doesn't" report (the bottom edge blends invisibly into that
+    # gap, easy to overshoot into). Dropped to 0 to reclaim nearly the
+    # full 72px row as real touch target.
     - id: row
       bg_opa: 0%
       border_width: 0
-      pad_all: 6
+      pad_all: 0
       width: 100%
       height: 72
   pages:
