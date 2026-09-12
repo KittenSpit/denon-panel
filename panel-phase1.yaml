@@ -385,7 +385,7 @@ binary_sensor:
     entity_id: light.living_two
     on_state:
       - lvgl.widget.update:
-          id: sw_living_two
+          id: btn_living_two
           state:
             checked: !lambda "return x;"
   - platform: homeassistant
@@ -393,7 +393,7 @@ binary_sensor:
     entity_id: light.test_hue_white
     on_state:
       - lvgl.widget.update:
-          id: sw_hue_white
+          id: btn_hue_white
           state:
             checked: !lambda "return x;"
 
@@ -608,11 +608,27 @@ lvgl:
                         std::string path = std::string("/goform/formiPhoneAppDirect.xml?Z2") + text;
                         denon_async_send_command(path.c_str());
 
-              - button:
+              - obj:
+                  # Wrapped in the row style (pad_all: 0, fixed height) for
+                  # the same reason as the Power/Mute buttons - an unwrapped
+                  # auto-sized button here sits loosely inside a generous
+                  # flex_align_main: space_evenly gap, so it LOOKS like it
+                  # has more clickable area below it than it actually does.
+                  styles: row
+                  layout:
+                    type: flex
+                    flex_flow: row
+                    flex_align_main: center
+                    flex_align_cross: center
                   widgets:
-                    - label: { text: "Lights & Backlight >" }
-                  on_click:
-                    - lvgl.page.show: main_page
+                    - button:
+                        id: nav_lights_btn
+                        width: 90%
+                        height: 100%
+                        widgets:
+                          - label: { text: "Lights & Backlight >" }
+                        on_click:
+                          - lvgl.page.show: main_page
 
     - id: main_page
       on_load:
@@ -641,20 +657,31 @@ lvgl:
                   text_color: 0x8899AA
 
               - obj:
+                  # Both lights side by side as colored toggle buttons -
+                  # same pattern as the Denon Power/Mute buttons: neutral
+                  # gray off, green when the light is actually on.
                   styles: row
                   layout:
                     type: flex
                     flex_flow: row
-                    flex_align_main: space_between
+                    flex_align_main: space_evenly
                     flex_align_cross: center
                   widgets:
-                    - label: { text: "Living Two" }
-                    - switch:
-                        id: sw_living_two
-                        on_value:
+                    - button:
+                        id: btn_living_two
+                        checkable: true
+                        width: 45%
+                        height: 100%
+                        bg_color: 0x2A2A2E
+                        checked:
+                          bg_color: 0x16A34A
+                        pressed:
+                          bg_opa: 70%
+                        widgets:
+                          - label: { text: "Living Two", text_color: 0xE2E8F0, text_font: montserrat_14 }
+                        on_click:
                           - if:
-                              condition:
-                                lambda: "return x;"
+                              condition: { lambda: "return lv_obj_has_state(id(btn_living_two), LV_STATE_CHECKED);" }
                               then:
                                 - homeassistant.action:
                                     action: light.turn_on
@@ -665,22 +692,21 @@ lvgl:
                                     action: light.turn_off
                                     data:
                                       entity_id: light.living_two
-
-              - obj:
-                  styles: row
-                  layout:
-                    type: flex
-                    flex_flow: row
-                    flex_align_main: space_between
-                    flex_align_cross: center
-                  widgets:
-                    - label: { text: "Test Hue White" }
-                    - switch:
-                        id: sw_hue_white
-                        on_value:
+                    - button:
+                        id: btn_hue_white
+                        checkable: true
+                        width: 45%
+                        height: 100%
+                        bg_color: 0x2A2A2E
+                        checked:
+                          bg_color: 0x16A34A
+                        pressed:
+                          bg_opa: 70%
+                        widgets:
+                          - label: { text: "Test Hue White", text_color: 0xE2E8F0, text_font: montserrat_14 }
+                        on_click:
                           - if:
-                              condition:
-                                lambda: "return x;"
+                              condition: { lambda: "return lv_obj_has_state(id(btn_hue_white), LV_STATE_CHECKED);" }
                               then:
                                 - homeassistant.action:
                                     action: light.turn_on
@@ -714,8 +740,19 @@ lvgl:
                   id: bl_value
                   text: "80%"
 
-              - button:
+              - obj:
+                  styles: row
+                  layout:
+                    type: flex
+                    flex_flow: row
+                    flex_align_main: center
+                    flex_align_cross: center
                   widgets:
-                    - label: { text: "< Denon (Kitchen)" }
-                  on_click:
-                    - lvgl.page.show: denon_page
+                    - button:
+                        id: nav_denon_btn
+                        width: 90%
+                        height: 100%
+                        widgets:
+                          - label: { text: "< Denon (Kitchen)" }
+                        on_click:
+                          - lvgl.page.show: denon_page
