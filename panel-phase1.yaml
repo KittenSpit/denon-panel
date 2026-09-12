@@ -404,7 +404,14 @@ lvgl:
     - lcd_display
   touchscreens:
     - touch_panel
-  buffer_size: 25%
+  # Full-frame draw buffer (was 25%). Costs ~338KB more PSRAM (112.5KB ->
+  # 450KB) against an 8MB chip - negligible headroom-wise. Point: a full
+  # page switch (lvgl.page.show) invalidates the whole 480x480 screen at
+  # once, and at 25% that needed 4 chunked render+flush passes to cover it;
+  # at 100% it's a single pass. Tried alongside the I2C investigation for
+  # the page-switch lag complaint - unlike that change, this is pure
+  # LVGL/software and carries no boot-watchdog risk.
+  buffer_size: 100%
   bg_color: 0x0B0F14
   text_font: montserrat_20
   on_idle:
