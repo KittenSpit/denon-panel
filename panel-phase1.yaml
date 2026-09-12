@@ -488,7 +488,7 @@ lvgl:
                         id: denon_mute_switch
                         on_value:
                           - lambda: |-
-                              denon_async_note_local_mute_action();
+                              denon_async_note_local_mute_action(x);
                               lv_label_set_text(id(denon_mute_label), x ? "Mute: ON" : "Mute: OFF");
                           - if:
                               condition: { lambda: "return x;" }

@@ -14,7 +14,7 @@
 //   button on_click:    denon_async_send_command("/goform/formiPhoneAppDirect.xml?Z2UP");
 //   fast interval:      DenonStatus st; if (denon_async_poll_status(&st)) { ...update LVGL... }
 //   on_idle / wake:     denon_async_set_screen_dimmed(true/false);
-//   mute switch tap:    denon_async_note_local_mute_action();
+//   mute switch tap:    denon_async_note_local_mute_action(new_state);
 //   on wake:            if (denon_async_was_paused()) { ...blank labels... }
 
 #include <atomic>
@@ -213,8 +213,22 @@ inline void denon_async_send_command(const char *path) {
     xQueueSend(g_cmd_queue, &cmd, 0);
 }
 
-inline void denon_async_note_local_mute_action() {
-  denon_async_internal::g_last_mute_action_ms = millis();
+// Call the instant a local tap changes the mute switch, with the state it
+// was just set to. Writes that value straight into the shared status struct
+// (not just starting the grace-period timer) so that a background poll
+// landing mid-grace - which deliberately leaves mute_on untouched, see
+// http_get_status() - can't push a *different* (older) value back out to
+// LVGL just because g_status_dirty is true for some other field. Confirmed
+// live this was the actual cause of mute flashing back to its old state
+// shortly after a tap: the poll's own mute skip was working correctly, but
+// the mailbox still held the pre-tap value underneath it.
+inline void denon_async_note_local_mute_action(bool new_state) {
+  using namespace denon_async_internal;
+  xSemaphoreTake(g_mutex, portMAX_DELAY);
+  g_last_mute_action_ms = millis();
+  g_status.mute_on = new_state;
+  g_status_dirty = true;
+  xSemaphoreGive(g_mutex);
 }
 
 inline void denon_async_set_screen_dimmed(bool dimmed) {
