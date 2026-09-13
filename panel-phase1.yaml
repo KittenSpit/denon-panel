@@ -496,6 +496,7 @@ lvgl:
                         checkable: true
                         width: 90%
                         height: 100%
+                        shadow_width: 0
                         bg_color: 0x2A2A2E
                         checked:
                           bg_color: 0x16A34A
@@ -528,6 +529,7 @@ lvgl:
                         checkable: true
                         width: 90%
                         height: 100%
+                        shadow_width: 0
                         bg_color: 0x2A2A2E
                         checked:
                           bg_color: 0xDC2626
@@ -576,6 +578,7 @@ lvgl:
                     flex_align_cross: center
                   widgets:
                     - button:
+                        shadow_width: 0
                         pressed:
                           bg_opa: 50%
                         widgets: [{ label: { text: "Vol -", align: center } }]
@@ -595,6 +598,7 @@ lvgl:
                                     lv_bar_set_value(id(denon_vol_bar), (int) id(denon_vol_db), LV_ANIM_OFF);
                                 - lambda: 'denon_async_send_command("/goform/formiPhoneAppDirect.xml?Z2DOWN");'
                     - button:
+                        shadow_width: 0
                         pressed:
                           bg_opa: 50%
                         widgets: [{ label: { text: "Vol +", align: center } }]
@@ -668,6 +672,7 @@ lvgl:
                         bg_opa: 0%
                         border_width: 0
                         outline_width: 0
+                        shadow_width: 0
                         widgets:
                           - obj:
                               width: 100%
@@ -723,6 +728,7 @@ lvgl:
                         checkable: true
                         width: 45%
                         height: 100%
+                        shadow_width: 0
                         bg_color: 0x2A2A2E
                         checked:
                           bg_color: 0x16A34A
@@ -748,6 +754,7 @@ lvgl:
                         checkable: true
                         width: 45%
                         height: 100%
+                        shadow_width: 0
                         bg_color: 0x2A2A2E
                         checked:
                           bg_color: 0x16A34A
@@ -808,6 +815,7 @@ lvgl:
                         bg_opa: 0%
                         border_width: 0
                         outline_width: 0
+                        shadow_width: 0
                         widgets:
                           - obj:
                               width: 100%
