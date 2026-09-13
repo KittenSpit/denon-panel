@@ -436,6 +436,14 @@ lvgl:
       pad_all: 0
       width: 100%
       height: 72
+      # Row containers are scrollable/auto-scrollbar by default in LVGL -
+      # scrollbar_mode: off was only set on the two top-level page
+      # containers, not these. A row whose flex content marginally exceeds
+      # its own exact bounds (easy with pad_all: 0 and a button set to
+      # width/height 100%) can trip LVGL's auto-scrollbar heuristic and
+      # show a thin sliver at the row's right edge - confirmed live via
+      # photo, next to Vol+. These rows never actually need to scroll.
+      scrollbar_mode: "off"
   pages:
     # ------------------------------------------------------------- DENON/KITCHEN
     # Default page - this panel lives in the Kitchen. No on_load poll here:
@@ -571,6 +579,8 @@ lvgl:
                   height: 60
                   bg_opa: 0%
                   border_width: 0
+                  scrollbar_mode: "off"
+                  scrollable: false
                   layout:
                     type: flex
                     flex_flow: row
